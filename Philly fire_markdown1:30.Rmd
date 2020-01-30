@@ -187,13 +187,6 @@ fire.sf <-
 fire.sf <- 
   st_intersection(fire.sf, philly)
 
-#Plot all fire points (2015-2019)
-#ggplot() +
-  #geom_sf(data = philly, fill = "grey40") +
-  #geom_sf(data = fire.sf , colour = "#FA7800", size = .75) +
-  #labs(title = "Philly fires") +
-  #mapTheme()
-
 # load hydrant inspection data
 inspect <- 
   st_read("PDF_Hydrant_Inspections_2019_for_MUSA/PDF_Hydrant_Inspections_2019.shp") %>%
@@ -203,12 +196,6 @@ inspect <-
 hydrants <- 
   st_read("Hydrants_2019/Hydrants_2019.shp") %>%
   st_transform(crs=2272) 
-
-#ggplot() + 
-  #geom_sf(data =hydrants, colour="#006699", size=0.3) +
-  #geom_sf(data = philly,fill=NA) +
-  #labs(title= "Hydrants in Philadelphia") +
-  #mapTheme()
 
 # load the engine locals data
 engine_new <- 
@@ -231,6 +218,28 @@ engine_old <-
 ```
 
 # Data wrangling
+
+## Fire incidents
+```{r firepoints, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Plot all fire points (2015-2019)
+ggplot() +
+  geom_sf(data = philly, fill=NA) +
+  geom_sf(data = fire.sf , colour = "red", size = .3) +
+  labs(title = "Fire incidents 2015-2019") +
+  mapTheme()
+```
+
+## Hydrants
+```{r hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Plot hydrant points
+ggplot() + 
+  geom_sf(data =hydrants, colour="#006699", size=0.2) +
+  geom_sf(data = philly,fill=NA) +
+  labs(title= "Hydrants in Philadelphia") +
+  mapTheme()
+```
+
+
 ## Fishnets
 800*800 fishnet
 ```{r fishnet, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
@@ -288,7 +297,7 @@ ggplot() +
 ```
 
 # Exploratory analysis
-## Count of fire incidents
+## What's the trend of the number of fire incidents over time?
 ```{r firecount, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
 #==============================================================
 ##### EA1: Explore fire count total and by year #####
