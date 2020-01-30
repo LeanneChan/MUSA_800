@@ -5,13 +5,10 @@ date: "1/30/2020"
 output:
   html_document#:
     code_folding: hide
-    theme: united
+    theme: lumen
     toc: yes
     toc_float: yes
     toc_depth: 5
-  html_document:
-    df_print: paged
-    toc: yes
 ---
 
 ```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
@@ -232,7 +229,8 @@ engine_old <-
   #mapTheme()
 ```
 
-# Creating fishnets
+# Data wrangling
+## Fishnets
 800*800 fishnet
 ```{r fishnet, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
 ##### FISHNET#####
