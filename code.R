@@ -62,6 +62,25 @@ ggplot() +
   mapTheme()
 
 ##### load original data#####
+# Fire hydrants shall be provided for detached one- and two-family dwellings in accordance with both of the following: 
+# (1) The maximum distance to a fire hydrant from the closest point on the building shall not exceed 600 ft (122183 m).
+# (2) The maximum distance between fire hydrants shall not exceed 800 ft (244 m).
+# create the 800ft grid cell fishnet
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+# clip the fishnet by the boundary
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+# plot the fishnet
+ggplot() +
+  geom_sf(data=philly,fill=NA) +
+  geom_sf(data=fishnet,fill=NA) +
+  labs(title = "Fishnet in Philly") +
+  mapTheme()
+
 # load the fire data
 fire <- read.csv("origin_data/2015 to 2019 fires for u of pa report run 1620.csv")%>%
   subset(.,longitude>0|latitude>0)%>%
@@ -121,10 +140,10 @@ ggplot() +
 ##### explore fire data by time (to be solved) #####
 fire <- 
   fire %>%
-  mutate(intervaday=floor_date(ymd_hms(alm_date),unit='day'),
-         year=year(interval60),
-         month=month(interval60),
-         dotw=wday(interval60,label=TRUE),
+  mutate(intervalday=floor_date(ymd_hms(alm_date),unit='day'),
+         year=year(intervalday),
+         month=month(intervalday),
+         dotw=wday(intervalday,label=TRUE),
          weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday")) 
 
 ##### explore leading cause of fires across philly #####
@@ -228,25 +247,6 @@ ggplot() +
   mapTheme()
 
 ##### visualize the fire data by 800*800 fishnet#####
-# Fire hydrants shall be provided for detached one- and two-family dwellings in accordance with both of the following: 
-# (1) The maximum distance to a fire hydrant from the closest point on the building shall not exceed 600 ft (122183 m).
-# (2) The maximum distance between fire hydrants shall not exceed 800 ft (244 m).
-# create the 800ft grid cell fishnet
-fishnet <- 
-  st_make_grid(philly, cellsize = 800) %>%
-  st_sf()
-# clip the fishnet by the boundary
-fishnet <- 
-  fishnet[philly,] %>%
-  mutate(uniqueID = rownames(.)) %>%
-  dplyr::select(uniqueID)
-# plot the fishnet
-ggplot() +
-  geom_sf(data=philly,fill=NA) +
-  geom_sf(data=fishnet,fill=NA) +
-  labs(title = "Fishnet in Philly") +
-  mapTheme()
-
 # join fire data to the fishnet
 fire_fishnet <- 
   fire %>% 
