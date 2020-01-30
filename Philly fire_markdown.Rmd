@@ -543,7 +543,9 @@ ggplot() +
   mapTheme()
 
 ```
+
 ## Leading cause of fires
+We made a ranking first based on "incident type":
 ```{r leadingcause, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
 ##### explore leading cause of fires across philly #####
 reorder_size <- function(x) {
