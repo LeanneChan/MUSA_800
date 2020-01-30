@@ -10,7 +10,7 @@ output:
     toc_depth: 5
     toc_float: yes
 ---
-
+**Several data are store in local path.**
 ```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
 setwd("/Users/ranxin/Desktop/Practicum")
 
