@@ -56,6 +56,7 @@ library(readr)
 library(readxl)
 library(QuantPsyc)
 library(lubridate)
+library(jsonlite)
 
 ##### SETUP #####
 mapTheme <- function(base_size = 12) {
@@ -544,9 +545,9 @@ ggplot() +
 
 ```
 
-## Leading cause of fires
+## What are the leading cause of fires?
 We made a ranking first based on "incident type":
-```{r leadingcause, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+```{r leadingcause, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=9, fig.width=13}
 ##### explore leading cause of fires across philly #####
 reorder_size <- function(x) {
   factor(x, levels = names(sort(table(x),decreasing=T)))
@@ -561,32 +562,35 @@ fire113 <-
   fire.sf %>%
   filter(., inci_type == 113)
 
-ggplot() + 
-  geom_sf(data =fire113, colour="#006699", size=0.7) +
-  geom_sf(data = philly,fill=NA) +
-  labs(title= "Cooking fire, confined to container") +
-  mapTheme()
-
 #visualize type 1110
 fire1110 <- 
   fire.sf %>%
   filter(., inci_type == 1110)
 
-ggplot() + 
-  geom_sf(data =fire1110, colour="#006699", size=0.7) +
-  geom_sf(data = philly,fill=NA) +
-  labs(title= "Building Fire, No Collapse") +
-  mapTheme()
-
 #visualize type 150
 fire150 <- 
   fire.sf %>%
   filter(., inci_type == 150)
+
+grid.arrange(
+ggplot() + 
+  geom_sf(data =fire113, colour="#006699", size=0.7) +
+  geom_sf(data = philly,fill=NA) +
+  labs(title= "NO.1 Cooking fire, confined to container") +
+  mapTheme(),
+
+ggplot() + 
+  geom_sf(data =fire1110, colour="#006699", size=0.7) +
+  geom_sf(data = philly,fill=NA) +
+  labs(title= "NO.2 Building Fire, No Collapse") +
+  mapTheme(),
+
 ggplot() + 
   geom_sf(data =fire150, colour="#006699", size=0.7) +
   geom_sf(data = philly,fill=NA) +
-  labs(title= "Outside rubbish fire, Other") +
-  mapTheme()
+  labs(title= "NO.3 Outside rubbish fire, Other") +
+  mapTheme(),
+ncol=3)
 ```
 
 ## Hydrants
@@ -620,3 +624,129 @@ ggplot() +
   mapTheme()
 ```
 
+## Are L&I Violations related to Fires? 
+Focusing on 3 currently: Unsafe Strucutres, Lacking Smoke Alarms, Uncertified Fire Extinguishers. Will add more and filter to 2015-2019 dates to match with Fire Data. 
+```{r unsafeStructures, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+unsafe_structureJSON<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)")
+unsafeDF <- 
+  as.data.frame(unsafe_structureJSON$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() + 
+  geom_sf(data=unsafeDF) +
+  geom_sf(data=tracts) +
+  geom_point(data=unsafeDF,
+             aes(x=X,y=Y), size=0.2, color='red') +
+  labs(title="Unsafe Buildings 2007-2020",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+# FISNET PLOT 
+
+unsafeStructure_fishnet <- 
+  unsafeDF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+unsafe<- ggplot() +
+  geom_sf(data = unsafeStructure_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(direction=-1,option="A") +
+  labs(title="Count of Unsafe Buildings ALL code=PM15-108.1 ",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+```
+
+```{r Lack Smoke Alarm, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# lack smoke alarm 
+lack_smokeAlarm<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-907.3/20%27)")
+lack_smokeAlarm_DF<-as.data.frame(lack_smokeAlarm$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() +
+  geom_sf(data=lack_smokeAlarm_DF) +
+  geom_sf(data=tracts) +
+  geom_point(data=lack_smokeAlarm_DF,
+             aes(x=X,y=Y), size=0.2, color='red') +
+  labs(title="Lack Smoke Alarm ALL, code=FC-907.3/20",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+LackSmokeAlarm_fishnet <- 
+  lack_smokeAlarm_DF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+smokeAlm<- ggplot() +
+  geom_sf(data = LackSmokeAlarm_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(option="A",direction=-1) +
+  labs(title="Count of Lack Smoke Alarm ALL, code=FC-907.3/20",
+       subtitle=paste("Source: L&I Violations", sep="; "))+
+  mapTheme()
+
+
+```
+
+```{r Uncertified Fire Extinguishers, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# Fire extinguisher not certifies 
+fire_ext_notcertified<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-906.2/2%27)")
+fire_ext_notcertified_DF<-as.data.frame(fire_ext_notcertified$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() +
+  geom_sf(data=fire_ext_notcertified_DF) +
+  geom_sf(data=tracts) +
+  geom_point(data=fire_ext_notcertified_DF,
+             aes(x=X,y=Y), size=0.1, color='red') +
+  labs(title="Fire Extinguisher Needs Inspection (ALL), code=FC-906.2/2",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+fireExtNotCertified_fishnet <- 
+  fire_ext_notcertified_DF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fireExt<-ggplot() +
+  geom_sf(data = fireExtNotCertified_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(option="A", direction=-1) +
+  labs(title="Count of Fire Extinguisher Lacking Inspection (ALL), code=FC-906.2/2",
+       subtitle=paste("Source: L&I Violations", sep="; "))+
+  mapTheme()
+```
+
+### Fishnet Counts of the 3 Violations vs Fire count
+```{r compile maps, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+#Map the fire fishnet map (2015-2019) (changed the color direction)
+fire<-ggplot() +
+  geom_sf(data = fire_fishnet, aes(fill = count), color=NA) +
+  scale_fill_viridis(option = "A", direction=-1) +
+  labs(title = "Count of fire incidents for the fishnet 2015-2019") +
+  mapTheme()
+grid.arrange(fire,unsafe, smokeAlm, fireExt, nrow = 2, ncol = 2)
+```
