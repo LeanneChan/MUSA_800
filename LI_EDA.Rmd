@@ -1,0 +1,218 @@
+---
+title: "LI_EDA"
+author: "Leanne Chan"
+date: "Feb 6, 2020"
+output:
+  html_document#:
+    code_folding: hide
+    theme: sandstone
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+---
+
+```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)                
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+library(plyr)
+```
+
+```{r map theme}
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+```
+
+```{r philly and fire data, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# city limits
+philly <- 
+  st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson")%>%
+  st_transform(crs=2272)
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+
+# fire data 
+fire.sf<-read_excel('2015 to 2019 fires for u of pa report run 1620.xlsx')%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)%>% 
+  st_intersection(., philly)%>%
+  mutate(date=dmy(alm_date),
+         Year=year(date))
+```
+
+### Get Kernel Density of Fires in each Year
+```{r KD fires years, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# for each set of points, filter by year get kernel density
+kernelDensity <- function(pointData, year, fishnetGrid, name){
+  data<-pointData %>%filter(Year == year)
+  count<- data %>% #get count by fishnet
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnetGrid, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnetGrid) / 24), size=nrow(fishnetGrid), replace = TRUE))
+  
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(count))
+  KD <- spatstat::density.ppp(point_ppp, 1000)
+  
+  KD_dataframe<-as.data.frame(KD) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnetGrid)) %>%
+    aggregate(.,fishnetGrid, mean)%>%plyr::rename(.,c('value' = name))
+    
+  return(KD_dataframe)
+}
+
+
+f15_KD <- kernelDensity(fire.sf, 2015, fishnet, 'Fire15KD')
+f16_KD <- kernelDensity(fire.sf, 2016, fishnet, 'Fire16KD')
+f17_KD <- kernelDensity(fire.sf, 2017, fishnet, 'Fire17KD')
+f18_KD <- kernelDensity(fire.sf, 2018, fishnet, 'Fire18KD')
+f19_KD <- kernelDensity(fire.sf, 2019, fishnet, 'Fire19KD')
+```
+
+# License and Inspection Violations Analysis 
+
+### Helper functions to read in data from API, aggregate data and to calculate nearest neighbor distances.
+```{r}
+# read data only for L&I violations, following carto API. 
+readData<-function(link){
+  raw<-fromJSON(link)
+  formated<- as.data.frame(raw$rows) %>%
+    dplyr::select(censustract,violationdate,violationdescription, status, casestatus, casepriority, geocode_x,geocode_y) %>%
+    mutate('Year' = year(ymd_hms(violationdate)))%>%
+    na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+    st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+    mutate(
+      X = st_coordinates(.)[,1],
+      Y = st_coordinates(.)[,2])
+  return(formated)
+}
+
+aggViolation<-function(violation, year, fishnet, KD_Fire){
+  data<-violation[violation$Year == year,]
+  # Step 1: Get fishnet count of that violation 
+  fishnetCount<-data %>% 
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  # Step 2: Get Kernel Density
+  name<-paste(year, "KD", sep="_")
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(fishnet))
+  KD_Viol <- as.data.frame(spatstat::density.ppp(point_ppp, 1000)) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnet)) %>%
+    aggregate(.,fishnet, mean)%>%plyr::rename(.,c('value' = name))
+  
+  
+  # Step 3: Join the  KD fire to the kernel density of violation to count of Violation
+  # also make sure the geometry is a centroid 
+  all_aggregates <- st_join(KD_Fire, KD_Viol %>% dplyr::select(name) %>% st_centroid(.))%>%
+  st_join(., fishnetCount%>% dplyr::select(count) %>% st_centroid(.))%>%st_centroid(.)
+
+  # Step 4: Add avg 5 nearest neighbor distances
+  all_aggregates$nn5 =
+      nn_function(st_coordinates(all_aggregates), st_coordinates(data), 5) # avg of 5 nearest neighbors
+  
+  return(all_aggregates)
+} 
+
+
+## nearest neighbor function
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+```
+
+## Violation 1: Unsafe Structures
+```{r unsafe structures}
+unsafe_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+
+# for unsafe structures
+unsafe_15<-aggViolation(unsafe_structures, 2015, fishnet, f15_KD)
+unsafe_16<-aggViolation(unsafe_structures, 2016, fishnet, f16_KD)
+unsafe_17<-aggViolation(unsafe_structures, 2017, fishnet, f17_KD)
+unsafe_18<-aggViolation(unsafe_structures, 2018, fishnet, f18_KD)
+unsafe_19<-aggViolation(unsafe_structures, 2019, fishnet, f19_KD)
+```
+
