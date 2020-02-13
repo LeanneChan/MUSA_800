@@ -1,0 +1,1741 @@
+---
+title: "Prioritizing Fire Hydrant Inspections in Philadelphia"
+author: "Ran Xin, Ziqun Li, Leanne Chan"
+date: "2/13/2020"
+output:
+  html_document#:
+    code_folding: hide
+    theme: sandstone
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+---
+```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+setwd("/Users/ranxin/Desktop/Practicum")
+
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+library(readr)
+library(ggplot2)
+library(gganimate)
+library(scales)
+library(dplyr)
+library(gifski)
+library(png)
+library(ggsn)
+library(ggpmisc) # to get R squared
+
+##### SETUP #####
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+#Nearest neighbor (NND) function
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+
+```
+
+# INTRODUCTION
+
+In November 2019, Fire Commissioner Adam Thiel announced that there were 32 deaths in 2019 alone due to fires in Philadelphia, and that this was the highest annually since 2014. Fires result in costly structural damage, and in the worst case, the loss of human life, thus a city must be prepared to fight fires, and this is contingent on working fire hydrants. At present, hydrants are inspected by the Philadelphia Fire Department (PFD) and maintained by the Philadelphia Water Department (PWD). Inspections are carried out based on engine locales by the local PFD engines in no particular order, and this results in an inefficiency of the firefighters’ time. A hydrant that is more likely in need of inspection could be the last on the list, and firefighters have to take time and energy to inspect each hydrant. To address this, we propose using past data on fires, hydrant inspections, and risk factors of fires, to identify areas in Philadelphia where fires are more likely and which hydrants are more likely not to work. Taking into consideration both fire risk and poor hydrant risk, we aim to generate a list for local engines to inspect hydrants and for the PWD to then maintain them. This would ensure that most hydrants are in good condition most of the time and allows firefighters to focus on a few hydrants rather than inspecting all hydrants. 
+
+# DATA
+
+For our analysis, we primarily use:
+
+- Data from Philadelphia Fire Department and Philadelphia Water Department in order to work on the most accurate and updated information for fire incidents and fire hydrants; 
+
+- Open data source (OpenDataPhilly) so that other municipalities with similar open data repositories can refer to or even reproduce our analysis.
+Our goal is to provide decision-makers with insight regarding the built-environment and intrinsic characters which might indicate the priority of fire hydrant inspections with the distribution of fire incidents over the City. At our current steps, we have been working on the following to prepare for our model: 
+
+**1. Intrinsic characteristics for hydrants**
+
+- Density of hydrants    
+
+- Distance to nearest hydrants
+
+- Age of hydrants
+
+- Defects on hydrants
+
+**2. Intrinsic characteristics for fires**
+
+- Density of fires
+
+- Distance to nearest fires 
+
+- Fire time (month)
+        
+**3. Environmental factors**
+
+- Unsafe Structures
+
+- Imminently Dangerous Structures  
+
+- Commercial Properties Lacking Proper Extinguishers 
+
+- Properties without Smoke Alarms 
+
+```{r dattable, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+require(readr)
+require(readxl)
+metadata <- read_excel("/Users/ranxin/Desktop/Practicum/Data list .xlsx")
+kable(metadata,
+      caption = "Table 1. Overview of data") %>%
+  kable_styling("striped", full_width = F)
+```
+
+**The limitation of our data includes (for current stage 2/13):**
+
+1. It still lacks important information for fires and hydrants. For example, the duration of a fire case so that we could see if the fire case is serious or just a small fire for evaluating the significance. Also, the past records for a fire hydrant being inspected so that we could see how frequent the inspection is to work on the priority for our next steps.
+
+2. It still lacks data that can inform the quality/history of a hydrant, as the project focuses on predicting the priority of hydrant inspection. For our next steps, we should find data related to property history. From our both literature review and exploratory analysis on data, the city form or the street grid is shaped by water distribution and sewage treatment network pipelines, so the history of hydrants is related with the history of adjacent property or streets as well. 
+
+The following code shows the importing procedure of current data (2/13):
+```{r data, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+##### DATA (external sources) #####
+#load the boundary data
+setwd("/Users/ranxin/Desktop/Practicum")
+philly<- st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson") %>%
+  st_set_crs(4326) %>%
+  na.omit() %>%
+  st_transform(2272)
+
+# load the neighborhood data
+neighbor <- 
+  st_read("/Users/ranxin/Desktop/Practicum/Neighborhoods_Philadelphia/Neighborhoods_Philadelphia.shp")%>%
+  na.omit() %>%
+  st_transform(crs=2272)
+# plot the neighbourhood
+#ggplot() +
+  #geom_sf(data=philly,fill=NA) +
+  #geom_sf(data=neighbor,fill=NA) +
+  #labs(title = "neighborhoods in Philly") +
+  #mapTheme()
+
+# load the census tracts data
+tracts <- 
+  st_read("http://data.phl.opendata.arcgis.com/datasets/ccdc0d022f4949a7b11333bd37231aef_0.geojson")%>%
+  st_set_crs(4326) %>%
+  na.omit() %>%
+  st_transform(crs=2272)
+# plot the census tracts
+#ggplot() +
+  #geom_sf(data=philly,fill=NA) +
+  #geom_sf(data=tracts,fill=NA) +
+  #labs(title = "Philadelphia census tracts") +
+  #mapTheme()
+
+#==================================================================
+##### DATA (original) #####
+
+# load the fire data
+fire_excel<-read_excel('2015 to 2019 fires for u of pa report run 1620.xlsx')
+
+fire.sf <- 
+  fire_excel%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+
+fire.sf <- 
+  st_intersection(fire.sf, philly)
+
+#Standarize date
+fire.sf <- 
+  fire.sf %>%
+  mutate(date=dmy(alm_date),
+         Year=year(date),
+         Month=month(date))
+
+# load hydrant inspection data
+inspect <- 
+  st_read("PDF_Hydrant_Inspections_2019_for_MUSA/PDF_Hydrant_Inspections_2019.shp") %>%
+  st_transform(crs=2272) 
+
+# load the hydrant data
+hydrants <- 
+  st_read("Hydrants_2019/Hydrants_2019.shp") %>%
+  st_transform(crs=2272) 
+
+# load the engine locals data
+engine_new <- 
+  st_read("EngineLocals/EngineLocals_New.shp") %>%
+  st_transform(crs=2272) 
+#ggplot() + 
+  #geom_sf(data =engine_new, colour="#006699", size=0.7) +
+  #geom_sf(data = philly,fill=NA) +
+  #labs(title= "Local engines (new)") +
+  #mapTheme()
+
+engine_old <- 
+  st_read("EngineLocals/EngineLocals_Old.shp") %>%
+  st_transform(crs=2272) 
+#ggplot() + 
+  #geom_sf(data =engine_old, colour="#006699", size=0.7) +
+  #geom_sf(data = philly,fill=NA) +
+  #labs(title= "Local engines (old)") +
+  #mapTheme()
+```
+
+
+
+
+# EXPLORATORY ANALYSIS
+
+A hydrant should have a higher priority of being inspected if
+
+
+**1) there is a latent risk of fire in the vicinity;**   
+
+
+**2) the hydrant is likely to be in poor condition.**
+
+
+Motivated by this, we explored the spatial and time distribution of fires in Philadelphia and the relationships between fires and the causes of fires, hydrants, and latent risk factors of fires. Analyzing the results from these relationships indicate which features could be significant in the model to predict hydrants for inspection in Philadelphia. Given that fire code by the National Fire Protection Association states that the maximum distance between fire hydrants should not exceed 800ft for detached one- and -two family dwellings, and that this for other buildings shall not exceed 500ft, we decided that an appropriate unit for analysis would be a 800x800ft grid cell size. Hence, our exploratory analysis measures data aggregated to this grid cell size. Throughout our analysis, we took into consideration the change in reporting protocol of fires in 2018, which resulted in a higher reporting of cooking fires. The resulting trend is a sharp increase in cooking fires since 2017. 
+
+```{r fishnet, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+##### create 800*800 fishnet #####
+# Fire hydrants shall be provided for detached one- and two-family dwellings in accordance with both of the following: 
+# (1) The maximum distance to a fire hydrant from the closest point on the building shall not exceed 600 ft (122183 m).
+# (2) The maximum distance between fire hydrants shall not exceed 800 ft (244 m).
+# create the 800ft grid cell fishnet
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+# clip the fishnet by the boundary
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+
+# join fire data to the fishnet
+fire_fishnet <- 
+  fire.sf %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+# join hydrant data to the fishnet
+hydrants_fishnet <- 
+  hydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+```
+
+## Part 1. What is the time-space pattern of fire in Philadelphia?
+
+### a. Time-Space pattern of fire incidents from 2015-2019
+
+```{r countNH, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center', fig.cap="Fig X: Total fire counts 2015-2019"}
+# line plot
+fire_byyear <- 
+  fire.sf%>%
+  group_by(.,Year)%>%
+  dplyr::summarise(count=n())
+
+ggplot(fire_byyear, aes(x=Year,y=count)) + 
+  geom_line() +
+  labs(title = "Fire counts by year (2015-2019)") +
+  scale_x_continuous(breaks=fire_byyear$Year)
+```
+
+```{r firecount, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, eval=FALSE,results='hide'}
+##### 1.1 Time-Space pattern of fire incidents from 2015-2019 #####
+# create a function to map fire by year and save it
+kernel_map <- function(fire.sf,year1,year2){
+  for (year in year1:year2) {
+    fire_year <- fire.sf %>%
+      filter(Year == year)
+    
+    fire_year_fishnet <- fire_year%>%
+      dplyr::select() %>% 
+      mutate(count = 1) %>% 
+      aggregate(., fishnet, sum) %>%
+      mutate(count = ifelse(is.na(count), 0, count),
+             uniqueID = rownames(.),
+             cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+    
+    fire_ppp_year <- as.ppp(st_coordinates(fire_year), W = st_bbox(fire_year_fishnet))
+    fire_KD_year <- spatstat::density.ppp(fire_ppp_year, 1000)
+    
+    map_year <- as.data.frame(fire_KD_year) %>% #2015
+      st_as_sf(coords = c("x", "y"), crs = st_crs(fire_year_fishnet)) %>%
+      aggregate(.,fire_year_fishnet, mean) %>%
+      ggplot() +
+      geom_sf(aes(fill=value),colour=NA) +
+      labs(title = year,subtitle= "Kernel density of fire incidents 2015-2019") +
+      scale_fill_viridis(option='inferno',discrete = FALSE) +
+      theme(legend.position = "right") +
+      mapTheme()
+    print(paste0("saving plot ", year))
+    ggsave(filename = paste0("./year_img/",year,".png"),width=10,height=7,dpi = 150)
+  }
+}
+kernel_map(fire.sf,2015,2019)
+
+# List those Plots by year, Read them in, and then make animation
+list.files(path = "./year_img/", pattern = "*.png", full.names = T) %>% 
+  map(image_read) %>% # reads each path file
+  image_join() %>% # joins image
+  image_animate(fps=2) %>% # animates, can opt for number of loops
+  image_write("./year_img/map_year.gif") # write to current dir
+```
+<center>
+![Fig X. Animation of kernel density of fires 2018 by month](/Users/ranxin/Desktop/Practicum/map_year.gif)
+</center>
+Fig X. Animation of kernel density of fires 2018 by month
+
+We first sought to explore the time-space pattern of fire incidents from 2015-2019. The GIF map above indicates that the spatial distribution of fire incident in Philadelphia changed significantly in 2018, and the fire incidents in both 2018 and 2019 seems to have similar spatial pattern.At the same time , the total fire counts by year also shows that the fire counts after 2017 has increased  largely, which is much more than the fire counts before 2017.Based on the above results, we decided to select the 2018 fire data as our key research data.
+
+
+### b. Are fires statistically related to one other?
+
+```{r countCS, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=8, fig.width=10, fig.cap="Fig X: Local Moran's I statistics of fire 2018"}
+# plot 2018 map
+fire2018<-
+  fire.sf %>%
+  filter(Year == 2018)
+
+fire2018_fishnet <- 
+  fire2018 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+fire_ppp_2018 <- as.ppp(st_coordinates(fire2018), W = st_bbox(fire2018_fishnet))
+fire_KD_2018 <- spatstat::density.ppp(fire_ppp_2018, 1000)
+
+# Local Moran's I
+fire2018_fishnet.nb <- poly2nb(fire2018_fishnet, queen=TRUE)
+fire2018_fishnet.weights <- nb2listw(fire2018_fishnet.nb, style="W", zero.policy=TRUE)
+
+fire2018_fishnet.localMorans <- 
+  cbind(
+    as.data.frame(localmoran(fire2018_fishnet$count, fire2018_fishnet.weights)),
+    as.data.frame(fire2018_fishnet, NULL)) %>% 
+  st_sf() %>%
+  dplyr::select(Fire_TotalCount = count, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z > 0)`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.05, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+vars <- unique(fire2018_fishnet.localMorans$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+    geom_sf(data = filter(fire2018_fishnet.localMorans, Variable == i), aes(fill = Value), colour=NA) +
+    scale_fill_viridis(option='inferno',name="") +
+    labs(title=i) +
+    mapTheme()}
+#Plot
+do.call(grid.arrange,c(varList, ncol = 2, top = "Local Morans I statistics, Fire incidents in Philly,2018"))
+```
+
+
+```{r KD1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',eval=FALSE}
+
+#Hotspots GIF
+sequence=seq(0, 0.05, by=0.001)
+
+for (i in sequence){
+  temp <-
+    fire2018_fishnet %>% 
+    mutate(fire.isSig = ifelse(localmoran(fire2018_fishnet$count, 
+                                          fire2018_fishnet.weights)[,5] <= i, "Statistically significant", "Not significant"))
+  
+  chart <-ggplot() + 
+    geom_sf(data = temp, aes(fill = fire.isSig),colour=NA) +
+    labs(title = "Significantly clustered fires (local hotspots)",
+         subtitle = i) +
+    scale_fill_manual(values = c("grey", "red"), name = "Values")+
+    mapTheme()
+  
+  ggsave(file=paste0("./GIF2/",i,".jpg"), plot = chart, width = 8, height = 4.5, units = "in", dpi=300)
+  print(paste0("processing: ", i))
+}
+
+library(magick)
+list.files(path = "./GIF2/", pattern = "*.jpg", full.names = T) %>% 
+  map(image_read) %>% # reads each path file
+  image_join() %>% # joins image
+  image_animate(fps=4) %>% # animates, can opt for number of loops
+  image_write("./GIF2/2018hotspots.gif")
+```
+<center>
+![Fig X. Animation of hotspots of fires 2018 by changing the threshold (p-value)](/Users/ranxin/Desktop/Practicum/GIF2/2018hotspots.gif)
+</center>
+Fig X. Animation of hotspots of fires 2018 by changing the threshold (p-value)
+
+Then, we try to explore the relationship between fires themselves using Local Moran’s I statistics. According to the GIF clustered fire map (Fig X), we set a lot of different P-value thresholds, and if the presence of one fire event correspond with a higher volume of others nearby, we would expect to observe clusters of fires. It is clearly that the amount of clustering is statistically significant.
+
+### c. Relationship between month and fire counts in 2018 (temporal feature)
+
+```{r moranI, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Fire counts by month in 2018"}
+#Fire by month
+fire_bymonth <- 
+  fire2018%>%
+  group_by(.,Month)%>%
+  dplyr::summarise(count=n())
+
+ggplot(fire_bymonth, aes(x=Month,y=count)) + 
+  geom_line() +
+  labs(title = "Fire counts by month, 2018") +
+  scale_x_continuous(breaks=fire_bymonth$Month)
+```
+```{r KDm, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,eval=FALSE}
+kernel_map_month <- function(fire.sf,year){
+  for (month in 1:12) {
+    fire_month <- fire.sf %>%
+      filter(Year == year)%>%
+      filter(Month == month)
+    
+    fire_month_fishnet <- fire_month%>%
+      dplyr::select() %>% 
+      mutate(count = 1) %>% 
+      aggregate(., fishnet, sum) %>%
+      mutate(count = ifelse(is.na(count), 0, count),
+             uniqueID = rownames(.),
+             cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+    
+    fire_ppp_month <- as.ppp(st_coordinates(fire_month), W = st_bbox(fire_month_fishnet))
+    fire_KD_month <- spatstat::density.ppp(fire_ppp_month, 1000)
+    
+    map_month <- as.data.frame(fire_KD_month) %>% #2015
+      st_as_sf(coords = c("x", "y"), crs = st_crs(fire_month_fishnet)) %>%
+      aggregate(.,fire_month_fishnet, mean) %>%
+      ggplot() +
+      geom_sf(aes(fill=value),colour=NA) +
+      labs(title = "Kernel density of fire incidents 2018" ,subtitle= month) +
+      scale_fill_viridis(option='inferno',discrete = FALSE) +
+      theme(legend.position = "right") +
+      mapTheme()
+    print(paste0("saving plot ", month))
+    ggsave(filename = paste0("./month_img/",month,".png"),width=10,height=7,dpi = 150)
+  }
+}
+kernel_map_month(fire.sf,2018)
+
+# List those Plots by month, Read them in, and then make animation
+list.files(path = "./month_img/", pattern = "*.png", full.names = T) %>% 
+  map(image_read) %>% # reads each path file
+  image_join() %>% # joins image
+  image_animate(fps=1) %>% # animates, can opt for number of loops
+  image_write("./month_img/map_month.gif")
+```
+
+</center>
+![Fig X.Animation of kernel density of fires 2018 by month](/Users/ranxin/Desktop/Practicum/map_month.gif)
+</center>
+Fig X.Animation of kernel density of fires 2018 by month
+
+Dose time effect have any impact on the fire density? We visualize the fire incidents counts and fire kernel density map by month.The  results shows that the fire incidents peak in **April, July** and **December**. Besides, since fire hotspots distribution varies during different month,it might be advisable for the fire departments to adjust their fire hydrant inspection strategies based on the seasons.
+
+### d. Relationship between zoning type and fire count in 2018 (spatial feature)
+```{r hotspo, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,results='hide'}
+zoning <- st_read("http://data.phl.opendata.arcgis.com/datasets/04fd29a8c022471994900cb0fd791bfc_0.geojson") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+
+fire2018.zone <- 
+  fire2018 %>%
+  st_join(.,zoning,join=st_intersects, left= TRUE) %>%
+  dplyr::select(inci_no,OVERLAY_SYMBOL)%>%
+  na.omit()
+```
+
+```{r hotspot, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. 2018 fire counts by zoning type"}
+##### 1.3 Type of zoning vs count of fires (use the zoning overlays) #####
+# visualize the relationship between zoning type and fire count
+reorder_size <- function(x) {
+  factor(x, levels = names(sort(table(x),decreasing=T)))
+}
+
+ggplot(fire2018.zone, aes(reorder_size(OVERLAY_SYMBOL)))+  
+  geom_bar() +
+  labs(title = "Count of fire incidents by zoning type")+
+  labs(y="Count", x = "Zoning type")+
+  theme(axis.text.x = element_text(angle = 60))
+
+```
+
+The zoning types might also be related with fire incidents. The following plot shows that those CTR, AHC, NE area are more likely to have fires than other zoning types.
+
+## Part 2. What is the relationship between fire type and fire count?
+### a. Histogram of fire count by fire type from 2015-2019
+```{r KD_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Histogram of fire causes"}
+##### 2.1 Histogram of type of fires in 2018 #####
+reorder_size <- function(x) {
+  factor(x, levels = names(sort(table(x),decreasing=T)))
+}
+
+ggplot(fire.sf, aes(reorder_size(inci_type))) + 
+  geom_bar() +  
+  labs(title= "Histogram-Causes of fires (2015-2019)")+
+  labs(x='causes',y='count')+
+  theme(axis.text.x = element_text(angle = 60))
+```
+What is the relationship between fire type and fire count? Based on the fire data from 2015-2019, the following fire types has become the top 3 fire incidents:
+
+ **NO.1  113 Cooking fire, confined to container**
+ 
+ **NO.2  1110 Building Fire, No Collapse**
+ 
+ **NO.3  150 Outside rubbish fire, Other**
+
+
+### b. The change of main fire types across philly（explain change after 2017)
+```{r NND_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center', fig.cap='Fig X. Change in count of fires in PA by causes'}
+library(plyr)
+counts <- ddply(fire.sf, .(fire.sf$descript, fire.sf$Year), nrow)
+names(counts) <- c("descript", "Year", "Freq")
+
+myvars <- c("Cooking fire, confined to container", "Building fire", "Building Fire, No Collapse", "Passenger vehicle fire", "Outside rubbish fire, Other", "Natural vegetation fire, Other", "Dumpster or other outside trash receptacle fire")
+countsTrimmed<-counts[counts$descript %in% myvars,]
+
+ggplot(countsTrimmed, aes(x = Year, y = Freq)) + 
+  geom_line(aes(color = descript)) +
+  labs(title="Change in count of fires in PA (common fires)")
+```
+
+According to the fire type counts by year, we seem to find the the answer that why fires counts increased rapidly these years:although the cooking fire has been the NO.1 cause of fire incidents, the cooking fire counts are still increased significantly, which nearly doubled during 2018! Besides,the outside rubbish fire and building fire have also increased to varying degrees.
+
+
+### c. Map the TOP3 fire types in 2018
+```{r FE_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap='Fig X. Kernel density of 2018 fire with TOP3 causes', fig.width=12}
+
+fire_type_map <- function(fire2018,type){
+  
+  fire_type <- fire2018 %>%
+    filter(fire2018$inci_type==type)
+  
+  fire_type_fishnet <- 
+    fire_type %>% 
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  fire_type_ppp <- as.ppp(st_coordinates(fire_type), W = st_bbox(fire_type_fishnet))
+  fire_type_KD <- spatstat::density.ppp(fire_type_ppp, 1000)
+  
+  as.data.frame(fire_type_KD) %>%
+    st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+    aggregate(.,fire_type_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+    labs(title =paste("Kernel density of fire type",type) ) +
+    scale_fill_viridis(option='inferno') +
+    mapTheme()
+}
+
+grid.arrange(fire_type_map(fire2018,113),
+             fire_type_map(fire2018,150),
+             fire_type_map(fire2018,111),
+             ncol=3)
+```
+
+All of those mentioned types needs to be focused on in the future fire prevention work. What we need to do first is to find their distribution characteristics. Basically, different types of fire happens in different areas, the cooking fire tend to clustered in the city center, the outside rubbish fire clustered in the north philly, while the building fire tend to happen in the western philly.
+
+
+## Part 3. What is the relationship between fires and hydrant quality?
+### a. Historical story about Philly's fire hydrants
+
+```{r KD_hydrants2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Kernel density change of fire hydrants since 1800", fig.width=15, fig.height=5}
+
+##### 3.1 Kernel density of fire hydrants during different periods #####
+hydrant_kernel_map <- function(hydrants,year1,year2){
+  hydrants_year <- 
+    hydrants %>%
+    filter(hydrants$YEAR_INSTA>year1 & hydrants$YEAR_INSTA<=year2 ) 
+  
+  hydrant_year_fishnet <- 
+    hydrants_year%>%
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(.,fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  hydrants_ppp_year <- as.ppp(st_coordinates(hydrants_year), W = st_bbox(hydrant_year_fishnet))
+  hydrants_KD_year <- spatstat::density.ppp(hydrants_ppp_year, 1000)
+  
+  as.data.frame(hydrants_KD_year) %>%
+    st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+    aggregate(.,hydrant_year_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+    labs(title = "Kernel density of fire hydrants",subtitle=
+           paste("1800 -",year2)) +
+    scale_fill_viridis() +
+    mapTheme()
+}
+
+grid.arrange(hydrant_kernel_map(hydrants,1800,1900),
+             hydrant_kernel_map(hydrants,1800,1950),
+             hydrant_kernel_map(hydrants,1800,2000),
+             hydrant_kernel_map(hydrants,1800,2019),ncol=4)
+```
+
+An historical story map of fire hydrants in Philly was showed above. In the 1900s, fire hydrants were mainly located in the city center; In the 1950s, the distribution of fire hydrants gradually began to spread around the city; In the 2000s, the fire hydrants had basically covered the whole city, and we can find that the fire hydrants density in the downtown area is greater than the surrounding area; In 2019, the spatial layout characteristics of fire hydrants are basically similar to 2000.
+
+
+**Relationship between new-built hydrants and fire counts in the past few years（2016-2019):**
+
+```{r story2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Relationship between new-built hydrants and fire counts in the past few years（2016-2019", fig.width=15, fig.height=8}
+
+#Kernel density of new-built hydrants for each year
+hydrant_kernel_map_year <- function(hydrants,year){
+  hydrants_year <- 
+    hydrants %>%
+    filter(hydrants$YEAR_INSTA==year ) 
+  
+  hydrant_year_fishnet <- 
+    hydrants_year%>%
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(.,fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  hydrants_ppp_year <- as.ppp(st_coordinates(hydrants_year), W = st_bbox(hydrant_year_fishnet))
+  hydrants_KD_year <- spatstat::density.ppp(hydrants_ppp_year, 1000)
+  
+  as.data.frame(hydrants_KD_year) %>%
+    st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+    aggregate(.,hydrant_year_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+    labs(title = paste("New-built fire hydrants in ", year)) +
+    scale_fill_viridis() +
+    mapTheme()
+}
+
+#Kernel density of fire counts for each year
+fire_kernel_map <- function(fire.sf,year){
+  fire_year <- fire.sf %>%
+    filter(fire.sf$Year==year)
+  
+  fire_year_fishnet <- fire_year%>%
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  fire_ppp_year <- as.ppp(st_coordinates(fire_year), W = st_bbox(fire_year_fishnet))
+  fire_KD_year <- spatstat::density.ppp(fire_ppp_year, 1000)
+  
+  as.data.frame(fire_KD_year) %>% #2015
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire_year_fishnet)) %>%
+    aggregate(.,fire_year_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = paste("Fire density in",year)) +
+    scale_fill_viridis(option='inferno',discrete = FALSE) +
+    theme(legend.position = "right") +
+    mapTheme()
+}
+
+grid.arrange(hydrant_kernel_map_year(hydrants,2016),
+             hydrant_kernel_map_year(hydrants,2017),
+             hydrant_kernel_map_year(hydrants,2018),
+             hydrant_kernel_map_year(hydrants,2019),
+             fire_kernel_map(fire.sf,2016),
+             fire_kernel_map(fire.sf,2017),
+             fire_kernel_map(fire.sf,2018),
+             fire_kernel_map(fire.sf,2019),
+             ncol=4)
+
+```
+Now, let's look at the those new-built fire hydrants during past few years. We have already known that the fire distribution across the city has changed significantly since 2018. However, are those new-built  fire hydrants were adapting to these fire changes? Unfortunately, those new-built fire hydrants and the fire hotspot areas seems have no relationships. That is also telling us: we need a more scientific strategy for both building and maintaining the fire hydrants in Philadelphia!
+
+### b. Explore hydrant age and defects & fire relationship
+
+From the year installed for each hydrant in the original data, we can calculate the age of each hydrant by 2020. The statistics of all hydrant ages shows that, the median age of hydrant is **57**, the mean age is **62.14**, the minimum age is 1, but the max age is **196** which is very old. The histogram of hydrant age roughly shows that more hydrants are in 50-60 year interval, and there are not so many “young” hydrants.
+```{r age0, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Distribution of hydrant age"}
+
+# Calculate age
+inspect$age<-2020-inspect$YEAR_INSTA
+#Histogram of age of hydrants
+#Filter the valid age: not 2020, not NA, not<0
+validage<-
+  inspect%>%
+  filter(age>=0 & age<2020 &age!="NA")
+
+     hist(validage$age,
+     main="Histogram of age of hydrants",
+     xlab = "Age",
+     ylab="Count",
+     col = "grey",
+     border = "black")
+
+```
+
+```{r age, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.width=5, fig.height=5, fig.cap="Fig X. Distribution of hydrant age on map"}
+
+#Quantile
+#0%  25%  50%  75% 100% 
+#1   26   57   96  196 
+
+# Visualize the distribution of age of hydrants (POINTS)
+palette5 <- c("#ffd700",
+              "#ffb14e",
+              "#fa8775",
+              "#ea5f94",
+              "#cd34b5")
+ggplot() +
+  geom_sf(data = tracts, fill = NA) +
+  geom_sf(data = validage, aes(col=cut(age,quantile(age))), show.legend = "point", size =0.4,alpha=0.3) +
+  scale_colour_manual(values = palette5,
+                      name="Quantile\nBreaks") +
+  labs(title="Hydrant age")+
+  mapTheme()
+
+```
+The map (Fig. X) visualizes the distribution of hydrants by age and classified by quantiles: we can clearly see that hydrants with ages in 3rth or 4th quartile are concentrated in west, center and north of Philadelphia. Northeast of the City has more relatively new hydrants. But the overall pattern shows that hydrants with different ages are mixed with each other. It is also possible that the hydrant age goes along with the building/street age and history.
+
+
+```{r bad0, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Histogram of number of defects on hydrants"}
+hist(inspect$DEFECTS,
+     main="Histogram of number of defects on hydrants",
+     xlab = "Count of defects",
+     ylab="Count",
+     col = "grey",
+     border = "black",
+     xlim = c(0,40), ylim = c(0,25000))
+
+```
+
+```{r bad1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.cap="Fig X. Distribution of number of defects on hydrants (map)",fig.width=5, fig.height=5}
+# Visualize the distribution of defects of hydrants (POINTS)
+ggplot() +
+  geom_sf(data = tracts, fill = NA) +
+  geom_sf(data = inspect, aes(col=DEFECTS), show.legend = "point", size = 0.4,alpha=0.3) +
+   scale_color_viridis(option="heat", direction=-1)+
+  labs(title="Number of defects on hydrants")+
+  mapTheme()
+```
+
+Also, based on the given original data, we can view the quality of a hydrant through **the number of defects** on it. We can see a great majority of hydrants have no defects on it from the histogram. The average number of defects on hydrants is **2.216**, the median is **0**, but the maximum number of defects is **40**! From the map, we can see hydrants with defects scatter around the City, but in Northeast, there is a cluster of hydrants with about 40 defects on them!
+
+In order to further facilitate our exploration on the relationship between fire and hydrant quality, we **reclassified** hydrants based on the values in **4 quantiles** of hydrant ages, and based on **4 equal intervals** of defect numbers (because the majority of hydrants don’t have defects) and then added two new **categorical** features:
+```{r bad2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+inspect <- 
+  inspect %>%
+  mutate(How_Old = case_when(
+    age >= 96 & age < 2020  ~ "96 to 196 years",
+    age >= 57 & age < 96  ~ "57 to 95 years",
+    age >=26 & age<57 ~ "26 to 56 years",
+    age >=0 & age<26 ~ "1 to 25 years",
+    age<0 ~ "Invalid data",
+    age=="NA"~ "Invalid data",
+    age>=2020 ~ "Invalid data"))
+
+inspect <- 
+  inspect %>%
+  mutate(How_Well = case_when(
+    DEFECTS ==0  ~ "No defects",
+    DEFECTS > 0 & DEFECTS <10  ~ "1 to 9 defects",
+    DEFECTS >=10 & DEFECTS<20 ~ "10 to 19 defects",
+    DEFECTS >= 20 & DEFECTS<30~ "20 to 29 defects",
+    DEFECTS >= 30 & DEFECTS< 40~ "30 to 39 defects",
+    DEFECTS >=40 ~ "equal and over 40 defects"))
+```
+
+Then, we filtered and defined two kinds of hydrants: **OLD hydrants** and **DEFECTIVE hydrants**: **Old hydrants** are the ones in 96 to 196 years old, and the age values are the top 25% (4th quartile) of all age values. **Defective hydrants** are the ones have defects (number of defects > 0):
+*(Additional information: The typical life expectancy for a hydrant is 40 to 60 years.)*
+
+```{r bad3, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+#===========
+#Old hydrants
+OldHydrants<-
+ inspect %>%
+  filter(How_Old == "96 to 196 years")
+
+# Fishnet  
+OldHydrants_fishnet <- 
+  OldHydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet)/24), size=nrow(fishnet), replace = TRUE))
+
+library(raster)
+OldHydrants_ppp <- as.ppp(st_coordinates(OldHydrants), W = st_bbox(OldHydrants_fishnet))
+OldHydrants_KD <- spatstat::density.ppp(OldHydrants_ppp, 1000)
+
+#===========
+#Defective hydrants
+BadHydrants<-
+  inspect %>%
+  filter(How_Well!="No defects")
+
+# Fishnet
+BadHydrants_fishnet <- 
+  BadHydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet)/24), size=nrow(fishnet), replace = TRUE))
+
+# KD
+BadHydrants_ppp <- as.ppp(st_coordinates(BadHydrants), W = st_bbox(BadHydrants_fishnet))
+BadHydrants_KD <- spatstat::density.ppp(BadHydrants_ppp, 1000)
+```
+
+ To let the relationship between fire and hydrant quality make more sense, **kernel density, Nearest Neighbor Distance** and **count** in each grid cell are calculated and integrated into one table, and we can choose the two with the highest correlation coeffection (r) to produce scattorplots: 
+```{r bad4, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results="hide"}
+
+fire2018<-
+  fire.sf %>%
+  filter(Year == 2018)
+
+fire2018_fishnet <- 
+  fire2018 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+fire_ppp_2018 <- as.ppp(st_coordinates(fire2018), W = st_bbox(fire2018_fishnet))
+fire_KD_2018 <- spatstat::density.ppp(fire_ppp_2018, 1000)
+
+OH_KD_temp<-
+as.data.frame(OldHydrants_KD)%>%
+    st_as_sf(coords = c("x", "y"), crs = st_crs(OldHydrants_fishnet)) %>%
+    aggregate(.,OldHydrants_fishnet, mean)
+names(OH_KD_temp)[names(OH_KD_temp) == 'value'] <- 'OH_KD_val'
+
+BH_KD_temp<-
+  as.data.frame(BadHydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(BadHydrants_fishnet)) %>%
+  aggregate(.,BadHydrants_fishnet, mean)
+names(BH_KD_temp)[names(BH_KD_temp) == 'value'] <- 'BH_KD_val'
+
+Fire2018_KD_temp<-
+as.data.frame(fire_KD_2018) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(fire2018_fishnet)) %>%
+  aggregate(.,fire2018_fishnet, mean)
+names(Fire2018_KD_temp)[names(Fire2018_KD_temp) == 'value'] <- 'Fire2018_KD_val'
+
+hydrants_ppp <- as.ppp(st_coordinates(hydrants), W = st_bbox(hydrants_fishnet))
+hydrants_KD <- spatstat::density.ppp(hydrants_ppp, 1000)
+Hydrants_KD_temp<-
+as.data.frame(hydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+  aggregate(.,hydrants_fishnet, mean)
+names(Hydrants_KD_temp)[names(Hydrants_KD_temp) == 'value'] <- 'Hydrants_KD_val'
+
+#Spatial join one by one
+net1 <-
+  OH_KD_temp%>%
+  st_join(., fishnet,join=st_equals)
+
+net2 <-
+  Hydrants_KD_temp%>%
+  st_join(., net1,join=st_equals)
+
+net3 <-
+  Fire2018_KD_temp%>%
+  st_join(., net2, join=st_equals)
+
+net4 <-
+  BH_KD_temp%>%
+  st_join(., net3, join=st_equals)
+
+net5 <-
+  OldHydrants_fishnet%>%
+  st_join(., net4, join=st_equals)
+names(net5)[names(net5) == 'count']<- 'oldH_count'
+
+net6 <-
+  BadHydrants_fishnet%>%
+  st_join(., net5, join=st_equals)
+names(net6)[names(net6) == 'count']<- 'badH_count'
+
+net7 <-
+  hydrants_fishnet%>%
+  st_join(., net6, join=st_equals)
+names(net7)[names(net7) == 'count']<- 'Hydrant_count'
+
+net8 <-
+  fire2018_fishnet%>%
+  st_join(., net7, join=st_equals)
+names(net8)[names(net8) == 'count']<- 'fire2018_count'
+
+#NND to hydrants
+net8$hydrants.nn =
+  nn_function(st_coordinates(st_centroid(net8)), st_coordinates(hydrants), 5)
+net8$Oldhydrants.nn =
+  nn_function(st_coordinates(st_centroid(net8)), st_coordinates(OldHydrants), 5)
+net8$Badhydrants.nn =
+  nn_function(st_coordinates(st_centroid(net8)), st_coordinates(BadHydrants), 5)
+net8$fires.nn =
+  nn_function(st_coordinates(st_centroid(net8)), st_coordinates(fire2018), 5)
+```
+
+The following scatterplots show the relationship between 2018 fire incidents and different measurement of hydrants (in kernel density or nearest distance). There is a **strong positive  correlation between fire and hydrant density, and between fire and old hydrant density**, implicating that not only more clustering fires with more clustering hydrants, but also more clustering old hydrants. But the correlation between the nearest neighbor distance to fire incidents and defective hydrants for each grid cell is not so strong:
+
+```{r bad5, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.width=15, fig.cap="Fig X. Scattorplots between fire and hydrants", fig.align='center'}
+
+#Select useful columns
+hydrantquality.df<-
+  net8%>%
+  as.data.frame()%>%
+  dplyr::select(fire2018_count,
+                Fire2018_KD_val,
+                fires.nn,
+                Hydrant_count,
+                Hydrants_KD_val,
+                hydrants.nn,
+                badH_count,
+                BH_KD_val,
+                Badhydrants.nn,
+                oldH_count,
+                OH_KD_val,
+                Oldhydrants.nn)
+
+# Scattorplot: show correlation
+grid.arrange(
+#1. Fire KD and Hydrant KD
+qplot(x=net8$Fire2018_KD_val,
+      y=net8$Hydrants_KD_val, 
+      main="Fire2018 density and hydrants density",
+      xlab='Kernel density of fire 2018',
+      ylab='Kernel density of hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE) + geom_text(aes(label = paste("r = ",round(cor(net8$Fire2018_KD_val,net8$Hydrants_KD_val),3))),
+                         x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+
+
+ 
+#2. Fire KD and OH KD
+qplot(x=net8$OH_KD_val,
+      y=net8$Fire2018_KD_val, 
+      main="Fire2018 density and old hydrants density",
+      ylab='Kernel density of fire 2018',
+      xlab='Kernel density of old hydrants (96-196 years)',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1/5),
+      se=FALSE)+geom_text(aes(label = paste("r = ",round(cor(net8$OH_KD_val,net8$Fire2018_KD_val),3))),
+                         x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+
+#3.  BH nn and fire nn
+qplot(x=Badhydrants.nn,
+      y=fires.nn,
+      main="Distance to Fire2018 and distance to defective hydrants",
+      xlab='Distance to defective hydrants (defects > 0)',
+      ylab='Distance to fire 2018',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net8)+geom_text(aes(label = paste("r = ",round(cor(net8$Badhydrants.nn,net8$fires.nn),3))),
+                           x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+ncol=3)
+```
+
+In addition, if we look at the relationship between hydrants, from the following scatterplots, we can see the correlation coefficient (r) is higher between the densities of old hydrants and all hydrants than between those of defective hydrants and all hydrants, which means that in a grid cell, there are more hydrants are old rather than defective. Lastly, if we explore the correlation between old and defective hydrants, we can see a weak positive relationship between the two types of hydrants. **More hydrants are old and timeworn rather than defective**: 
+```{r bad9, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.width=15, fig.cap="Fig X. Scattorplots between hydrants", fig.align='center'}
+
+grid.arrange(
+#4. OH KD and hydrants KD
+qplot(x=OH_KD_val,
+      y=Hydrants_KD_val, 
+      main="Old hydrants density and hydrants density",
+      xlab='Kernel density of old hydrants (96-196 years)',
+      ylab='Kernel density of hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net8)+geom_text(aes(label = paste("r = ",round(cor(net8$OH_KD_val,net8$Hydrants_KD_val),3))),
+                           x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+
+#5. BH KD and hydrants KD
+qplot(x=BH_KD_val,
+      y=Hydrants_KD_val, 
+      main="Defective hydrants density and hydrants density",
+      xlab='Kernel density of defective (defects > 0)',
+      ylab='Kernel density of hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net8)+geom_text(aes(label = paste("r = ",round(cor(net8$BH_KD_val,net8$Hydrants_KD_val),3))),
+                           x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+
+
+#6. OH KD and BH KD
+qplot(x=OH_KD_val,
+      y=BH_KD_val, 
+      main="Old hydrants density and defective hydrants density",
+      xlab='Kernel density of old hydrants (96-196 years)',
+      ylab='Kernel density of defective hydrants (defects > 0)',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net8)+geom_text(aes(label = paste("r = ",round(cor(net8$OH_KD_val,net8$BH_KD_val),3))),
+                           x=-Inf, y=Inf, vjust = 1, hjust = -.1),
+ncol=3)
+```
+
+## Part 4. Do blight features increase risk of fire?
+
+Areas with a higher risk of fire are more in need of fire hydrants. In order to predict the latent risk of fire, License and Inspection violations that could potential increase the risk of fire were analyzed. Four different L&I violations were analayzed:  
+
+1. **Unsafe Structures** 
+
+2. **Imminently Dangerous Structures**  
+
+3. **Commercial Properties Lacking Proper Extinguishers**  
+
+4. **Properties without Smoke Alarms**  
+
+Three measures were used to analyze the relationship:  
+
+1. **Kernel Density**: This is the average spatial density of the violation per grid cell.  
+
+2. **Count**: This is the count of violations per grid cell.  
+
+3. **Nearest Neighbor Distance**: The average distance from each grid cell to the nearest 5 violations.  
+
+Each of these measures were measured against the Kernel Density of fires per grid cell.
+
+The following code contains helper functions to read in data from API, aggregate data and to calculate nearest neighbor distances.
+```{r bad10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,results='hide'}
+# read data only for L&I violations, following carto API. 
+readData<-function(link){
+  raw<-fromJSON(link)
+  formated<- as.data.frame(raw$rows) %>%
+    dplyr::select(censustract,violationdate,violationdescription, status, casestatus, casepriority, geocode_x,geocode_y) %>%
+    mutate('Year' = year(ymd_hms(violationdate)))%>%
+    na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+    st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+    mutate(
+      X = st_coordinates(.)[,1],
+      Y = st_coordinates(.)[,2])
+  return(formated)
+}
+
+aggViolation<-function(violation, year, fishnet, KD_Fire){
+  data<-violation[violation$Year == year,]
+  # Step 1: Get fishnet count of that violation 
+  fishnetCount<-data %>% 
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  # Step 2: Get Kernel Density
+  name<-paste(year, "KD", sep="_")
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(fishnet))
+  KD_Viol <- as.data.frame(spatstat::density.ppp(point_ppp, 1000)) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnet)) %>%
+    aggregate(.,fishnet, mean)%>%plyr::rename(.,c('value' = name))
+  
+  
+  # Step 3: Join the  KD fire to the kernel density of violation to count of Violation
+  # also make sure the geometry is a centroid 
+  all_aggregates <- st_join(KD_Fire, KD_Viol %>% dplyr::select(name) %>% st_centroid(.))%>%
+  st_join(., fishnetCount%>% dplyr::select(count) %>% st_centroid(.))%>%st_centroid(.)
+
+  # Step 4: Add avg 5 nearest neighbor distances
+  all_aggregates$nn5 =
+      nn_function(st_coordinates(all_aggregates), st_coordinates(data), 5) # avg of 5 nearest neighbors
+  
+  return(all_aggregates)
+} 
+
+
+## nearest neighbor function
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+```
+
+### Violation 1: Unsafe Structures
+A structure is deemed unsafe if it is dangerous to life, health and safety of the public or occupants, either because it does not protect/warn occupants in the event of a fire, or becasue it constains unsafe/damanged equipment. Therefore, it felt necessary to examine how the presence of unsafe structures could increase the risk of fire. Given that there is a relationship, such a factor would be useful in predicting the risk of fire, and identifying areas where a working hydrant is more crucial.
+```{r unsafe data,fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+unsafe_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)") 
+```
+
+#### 1a. Plot of Kernel Density of Unsafe Structures Across Philly
+
+```{r KD fires years, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# for each set of points, filter by year get kernel density
+kernelDensity <- function(pointData, year, fishnetGrid, name){
+  data<-pointData %>%filter(Year == year)
+  count<- data %>% #get count by fishnet
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnetGrid, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnetGrid) / 24), size=nrow(fishnetGrid), replace = TRUE))
+  
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(count))
+  KD <- spatstat::density.ppp(point_ppp, 1000)
+  
+  KD_dataframe<-as.data.frame(KD) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnetGrid)) %>%
+    aggregate(.,fishnetGrid, mean)%>%plyr::rename(.,c('value' = name))
+    
+  return(KD_dataframe)
+}
+
+
+f15_KD <- kernelDensity(fire.sf, 2015, fishnet, 'Fire15KD')
+f16_KD <- kernelDensity(fire.sf, 2016, fishnet, 'Fire16KD')
+f17_KD <- kernelDensity(fire.sf, 2017, fishnet, 'Fire17KD')
+f18_KD <- kernelDensity(fire.sf, 2018, fishnet, 'Fire18KD')
+f19_KD <- kernelDensity(fire.sf, 2019, fishnet, 'Fire19KD')
+```
+
+
+```{r US KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+USKD_15<- kernelDensity(unsafe_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_16<- kernelDensity(unsafe_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_17<- kernelDensity(unsafe_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+USKD_18<- kernelDensity(unsafe_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_19<- kernelDensity(unsafe_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(USKD_15,USKD_16,USKD_17,USKD_18,USKD_19, ncol=3, top="KD of Unsafe Structures; Source: L&I Violations")
+
+```
+
+#### 1b. Relationship to Fire Kernel Density
+```{r unsafe structures,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+# for unsafe structures
+unsafe_15<-aggViolation(unsafe_structures, 2015, fishnet, f15_KD)
+unsafe_16<-aggViolation(unsafe_structures, 2016, fishnet, f16_KD)
+unsafe_17<-aggViolation(unsafe_structures, 2017, fishnet, f17_KD)
+unsafe_18<-aggViolation(unsafe_structures, 2018, fishnet, f18_KD)
+unsafe_19<-aggViolation(unsafe_structures, 2019, fishnet, f19_KD)
+
+
+year15<- unsafe_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16<-unsafe_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17<-unsafe_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18<-unsafe_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19<-unsafe_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+grid.arrange(year15, year16, year17, year18, year19, ncol=1, top="Unsafe Structures PM15-108.1; Source: L&I Violations")
+```
+
+
+### Violation 2: Imminently Dangerous
+An imminently dangerous structure is one that 'IS IN IMMINENT DANGER OF COLLAPSE YOU MUST REPAIR OR DEMOLISH SAID STRUCTURE IMMEDIATELY'. The presence of such structures could add to the risk of fire in the area. 
+
+```{r id DATA, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+ID_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-110.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+#### 2a. Plot of Kernel Density of Imminently Dangerous Structures Across Philly
+```{r id KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+IDKD_15<- kernelDensity(ID_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_16<- kernelDensity(ID_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_17<- kernelDensity(ID_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+IDKD_18<- kernelDensity(ID_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_19<- kernelDensity(ID_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(IDKD_15,IDKD_16,IDKD_17,IDKD_18,IDKD_19, ncol=3, top="KD of Imminently Dangerous Structures; Source: L&I Violations")
+
+```
+
+#### 2b. Relationship to Fire Kernel Density
+```{r imminently dangerous,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+
+ID_15<-aggViolation(ID_structures, 2015, fishnet, f15_KD)
+ID_16<-aggViolation(ID_structures, 2016, fishnet, f16_KD)
+ID_17<-aggViolation(ID_structures, 2017, fishnet, f17_KD)
+ID_18<-aggViolation(ID_structures, 2018, fishnet, f18_KD)
+ID_19<-aggViolation(ID_structures, 2019, fishnet, f19_KD)
+
+
+year15_ID<- ID_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_ID<-ID_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_ID<-ID_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18_ID<-ID_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19_ID<-ID_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+grid.arrange(year15_ID, year16_ID, year17_ID, year18_ID, year19_ID, ncol=1, top="Imminently Dangerous Structures, PM15-110.11; Source: L&I Violations")
+
+
+  
+```
+
+
+
+### Violation 3: Lacking Proper Fire Extinguisher for Commercial Cooking
+This violation is issued to commercial establishments that do not have the 'CLASS K RATED' fire extinguishers required for cooking involving vegetable or animal oils and fats. Commercial establishments that lack the correct fire extinguishers increase the risk of a large fire that could put staff and customers at risk. Thus it is necessary to identify areas where this violation is common. 
+
+Note: 2018 and 2019 have been ommitted in relationship analysis to fire as there was only one case for 2018 and two cases for 2019. 
+```{r CE data,   fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+CE_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-904.11/5%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+
+#### 3a. Plot of Kernel Density of Commericial Properties Lacking Proper Fire Extinguishers Across Philly
+```{r CE KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+CEKD_15<- kernelDensity(CE_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_16<- kernelDensity(CE_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_17<- kernelDensity(CE_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+CEKD_18<- kernelDensity(CE_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_19<- kernelDensity(CE_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(CEKD_15,CEKD_16,CEKD_17,CEKD_18,CEKD_19, ncol=3, top="KD of Commercial Properties Lacking Proper Extinguishers; Source: L&I Violations")
+
+```
+
+#### 3b. Relationship to Fire Kernel Density
+```{r commercial Fire Extinguisher, fig.width=12, fig.height=9, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+
+CE_15<-aggViolation(CE_structures, 2015, fishnet, f15_KD)
+CE_16<-aggViolation(CE_structures, 2016, fishnet, f16_KD)
+CE_17<-aggViolation(CE_structures, 2017, fishnet, f17_KD)
+#CE_18<-aggViolation(CE_structures, 2018, fishnet, f18_KD)
+#CE_19<-aggViolation(CE_structures, 2019, fishnet, f19_KD)
+
+
+year15_CE<- CE_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_CE<-CE_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_CE<-CE_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+# year18_CE<-CE_18%>%st_set_geometry(NULL)%>%
+#   gather(Variable, Value, -Fire18KD)  %>%
+#    ggplot(aes(Value, Fire18KD)) +
+#      geom_point() +
+#      geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+#     stat_poly_eq(formula = y ~ x,
+#                eq.with.lhs = "italic(hat(y))~`=`~",
+#                aes(label = paste(..rr.label.., sep =" ")), 
+#                parse = TRUE, label.x = 60, label.y = 70) +    
+#      facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+# 
+# 
+# year19_CE<-CE_19%>%st_set_geometry(NULL)%>%
+#   gather(Variable, Value, -Fire19KD)  %>%
+#    ggplot(aes(Value, Fire19KD)) +
+#      geom_point() +
+#      geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+#     stat_poly_eq(formula = y ~ x,
+#                eq.with.lhs = "italic(hat(y))~`=`~",
+#                aes(label = paste(..rr.label.., sep =" ")), 
+#                parse = TRUE, label.x = 60, label.y = 70) +    
+#      facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+# 
+
+grid.arrange(year15_CE, year16_CE, year17_CE, ncol=1, top="Commerical Cooking Lack Proper Fire Extinguisher, FC-904.11/5; Source: L&I Violations")
+```
+
+
+### Violation 4: Lacking smoke Alarm
+Such properties lack the required smoke alarms and thus put lives in danger should there be a fires, making it necessary to ensure hydrants are in working condition near these areas. 
+
+```{r ALM DATA, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+ALM_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-907.3/20%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+#### 4a. Plot of Kernel Density of Properties lacking smoke alarams Across Philly
+```{r ALM KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+ALMKD_15<- kernelDensity(ALM_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_16<- kernelDensity(ALM_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_17<- kernelDensity(ALM_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+ALMKD_18<- kernelDensity(ALM_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_19<- kernelDensity(ALM_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(ALMKD_15,ALMKD_16,ALMKD_17,ALMKD_18,ALMKD_19, ncol=3, top="KD of Properties without Smoke Alarms; Source: L&I Violations")
+
+```
+
+
+#### 4b. Relationship to Fire Kernel Density
+```{r smoke alarms,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+ALM_15<-aggViolation(ALM_structures, 2015, fishnet, f15_KD)
+ALM_16<-aggViolation(ALM_structures, 2016, fishnet, f16_KD)
+ALM_17<-aggViolation(ALM_structures, 2017, fishnet, f17_KD)
+ALM_18<-aggViolation(ALM_structures, 2018, fishnet, f18_KD)
+ALM_19<-aggViolation(ALM_structures, 2019, fishnet, f19_KD)
+
+
+year15_ALM<- ALM_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_ALM<-ALM_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_ALM<-ALM_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18_ALM<-ALM_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19_ALM<-ALM_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+
+grid.arrange(year15_ALM, year16_ALM, year17_ALM, year18_ALM, year19_ALM, ncol=1, top="Property Lacks Smoke Alarm, FC-907.3/20; Source: L&I Violations")
+
+```
+

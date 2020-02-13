@@ -1,0 +1,1532 @@
+---
+title: "Prioritizing Fire Hydrant Inspections in Philadelphia"
+author: "Ran Xin, Ziqun Li, Leanne Chan"
+date: "2/06/2020"
+output:
+  html_document#:
+    code_folding: hide
+    theme: sandstone
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+---
+**Several data are store in local path.**
+**Set workspace first.**
+```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+setwd("/Users/ranxin/Desktop/Practicum")
+
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+
+##### SETUP #####
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+#Nearest neighbor (NND) function
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+
+```
+
+# INTRODUCTION
+
+# USE CASE
+Develop algorithms to efficiently allocate limited hydrant inspection resources
+
+Users/clients: Philadelphia Fire Department, Philly Water Dept, other municipal services
+
+Philly Fire Dept: Hydrant inspection. 
+
+Philly Water Dept: Hydrant maintenance.
+
+Current approach: hydrants are inspected by local Engines according to fire districts, no real priority.
+
+# DATA
+Data summary
+```{r data, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+##### DATA (external sources) #####
+#load the boundary data
+setwd("/Users/ranxin/Desktop/Practicum")
+philly<- st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson") %>%
+  st_set_crs(4326) %>%
+  na.omit() %>%
+  st_transform(2272)
+
+# load the neighborhood data
+neighbor <- 
+  st_read("/Users/ranxin/Desktop/Practicum/Neighborhoods_Philadelphia/Neighborhoods_Philadelphia.shp")%>%
+  na.omit() %>%
+  st_transform(crs=2272)
+# plot the neighbourhood
+#ggplot() +
+  #geom_sf(data=philly,fill=NA) +
+  #geom_sf(data=neighbor,fill=NA) +
+  #labs(title = "neighborhoods in Philly") +
+  #mapTheme()
+
+# load the census tracts data
+tracts <- 
+  st_read("http://data.phl.opendata.arcgis.com/datasets/ccdc0d022f4949a7b11333bd37231aef_0.geojson")%>%
+  st_set_crs(4326) %>%
+  na.omit() %>%
+  st_transform(crs=2272)
+# plot the census tracts
+#ggplot() +
+  #geom_sf(data=philly,fill=NA) +
+  #geom_sf(data=tracts,fill=NA) +
+  #labs(title = "Philadelphia census tracts") +
+  #mapTheme()
+
+#==================================================================
+##### DATA (original) #####
+
+# load the fire data
+fire_excel<-read_excel('2015 to 2019 fires for u of pa report run 1620.xlsx')
+
+fire.sf <- 
+  fire_excel%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+
+fire.sf <- 
+  st_intersection(fire.sf, philly)
+
+# load hydrant inspection data
+inspect <- 
+  st_read("PDF_Hydrant_Inspections_2019_for_MUSA/PDF_Hydrant_Inspections_2019.shp") %>%
+  st_transform(crs=2272) 
+
+# load the hydrant data
+hydrants <- 
+  st_read("Hydrants_2019/Hydrants_2019.shp") %>%
+  st_transform(crs=2272) 
+
+# load the engine locals data
+engine_new <- 
+  st_read("EngineLocals/EngineLocals_New.shp") %>%
+  st_transform(crs=2272) 
+#ggplot() + 
+  #geom_sf(data =engine_new, colour="#006699", size=0.7) +
+  #geom_sf(data = philly,fill=NA) +
+  #labs(title= "Local engines (new)") +
+  #mapTheme()
+
+engine_old <- 
+  st_read("EngineLocals/EngineLocals_Old.shp") %>%
+  st_transform(crs=2272) 
+#ggplot() + 
+  #geom_sf(data =engine_old, colour="#006699", size=0.7) +
+  #geom_sf(data = philly,fill=NA) +
+  #labs(title= "Local engines (old)") +
+  #mapTheme()
+```
+
+# DATA WRANGLING
+
+## Fire incidents
+```{r firepoints, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Plot all fire points (2015-2019)
+ggplot() +
+  geom_sf(data = philly, fill=NA) +
+  geom_sf(data = fire.sf , colour = "red", size = .3) +
+  labs(title = "Points of Fires 2015-2019") +
+  mapTheme()
+```
+
+```{r firecount1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Standarize date
+fire.sf <- 
+  fire.sf %>%
+  mutate(date=dmy(alm_date),
+         Year=year(date),
+         Month=month(date))
+grid.arrange(
+  ggplot(fire.sf, aes(Year)) + 
+  geom_bar() +
+  labs(title = "Fire counts by year") +
+  theme(axis.text.x = element_text(angle = 60)),
+
+ggplot(fire.sf, aes(Month)) + 
+  geom_bar() +
+  labs(title = "Fire counts by month") +
+  theme(axis.text.x = element_text(angle = 60)),
+ncol=1)
+```
+
+**Leading cause of fires**
+```{r leadingcause1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=6, fig.width=12}
+
+##### explore leading cause of fires across philly #####
+reorder_size <- function(x) {
+  factor(x, levels = names(sort(table(x),decreasing=T)))
+}
+
+ggplot(fire.sf, aes(reorder_size(inci_type))) + 
+  geom_bar() +  
+  labs(title= "Histogram-Causes of fires")+
+  labs(x='causes',y='count')+
+  theme(axis.text.x = element_text(angle = 60))
+
+# fire113
+fire113 <- 
+  fire.sf %>%
+  filter(., inci_type == 113)
+
+# fire1110
+fire1110 <- 
+  fire.sf %>%
+  filter(., inci_type == 1110)
+
+#fire 150
+fire150 <- 
+  fire.sf %>%
+  filter(., inci_type == 150)
+
+grid.arrange(  #Point
+               ggplot() + 
+               geom_sf(data =fire113, colour="red", size=0.7) +
+               geom_sf(data = philly,fill=NA) +
+               labs(title= "NO.1 Cooking fire, confined to container") +
+               mapTheme(),
+             ggplot() + 
+               geom_sf(data =fire1110, colour="red", size=0.7) +
+               geom_sf(data = philly,fill=NA) +
+               labs(title= "NO.2 Building Fire, No Collapse 1110") +
+               mapTheme(),
+             ggplot() + 
+               geom_sf(data =fire150, colour="red", size=0.7) +
+               geom_sf(data = philly,fill=NA) +
+               labs(title= "NO.3 Outside rubbish fire, Other 150") +
+               mapTheme(),
+               
+             nrow=1)
+```
+
+
+## Hydrants
+```{r hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Plot hydrant points
+ggplot() + 
+  geom_sf(data =hydrants, colour="#006699", size=0.2) +
+  geom_sf(data = philly,fill=NA) +
+  labs(title= "Hydrants in Philadelphia") +
+  mapTheme()
+```
+
+
+## Fishnets
+800*800 fishnet
+```{r fishnet, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+##### FISHNET#####
+# Fire hydrants shall be provided for detached one- and two-family dwellings in accordance with both of the following: 
+# (1) The maximum distance to a fire hydrant from the closest point on the building shall not exceed 600 ft (122183 m).
+# (2) The maximum distance between fire hydrants shall not exceed 800 ft (244 m).
+# create the 800ft grid cell fishnet
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+# clip the fishnet by the boundary
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+# plot the fishnet
+ggplot() +
+  geom_sf(data=fishnet,fill=NA) +
+  labs(title = "Philadelphia fishnet") +
+  mapTheme()
+
+# join fire data to the fishnet
+fire_fishnet <- 
+  fire.sf %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+# join hydrant data to the fishnet
+hydrants_fishnet <- 
+  hydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#Map the fire fishnet map and hydrants fishnet map
+  grid.arrange(
+    ggplot() +
+  geom_sf(data = fire_fishnet, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of fire incidents for the fishnet 2015-2019")+
+    mapTheme(),
+  
+  #1. Histogram for total count 2015-2019
+ggplot(fire_fishnet, aes(count)) + 
+  geom_histogram(binwidth = 1) +
+  labs(title = "Distribution of fire incidents by grid cell 2015-2019"),
+ncol=2)
+
+               grid.arrange(
+                 ggplot() +
+               geom_sf(data = hydrants_fishnet, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of hydrants for the fishnet") +
+               mapTheme(),
+               
+  ggplot(hydrants_fishnet, aes(count)) + 
+  geom_histogram(binwidth = 1) +
+  labs(title = "Distribution of hydrants by grid cell"),
+  ncol=2)
+
+```
+
+# EXPLORATORY ANALYSIS
+## Fires over time and space
+
+### By year
+```{r firecount, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+#==============================================================
+##### EA1: Explore fire count total and by year #####
+
+#2015
+fire2015<-
+  fire.sf %>%
+  filter(Year == 2015)
+# join fire data to the fishnet
+fire2015_fishnet <- 
+  fire2015 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#2016
+fire2016<-
+  fire.sf %>%
+  filter(Year == 2016)
+# join fire data to the fishnet
+fire2016_fishnet <- 
+  fire2016 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#2017
+fire2017<-
+  fire.sf %>%
+  filter(Year == 2017)
+# join fire data to the fishnet
+fire2017_fishnet <- 
+  fire2017 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#2018
+fire2018<-
+  fire.sf %>%
+  filter(Year == 2018)
+# join fire data to the fishnet
+fire2018_fishnet <- 
+  fire2018 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#2019
+fire2019<-
+  fire.sf %>%
+  filter(Year == 2019)
+# join fire data to the fishnet
+fire2019_fishnet <- 
+  fire2019 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+#Count: Map the fire fishnet map (2015-2019)
+grid.arrange(
+  ggplot() +
+    geom_sf(data = fire2015_fishnet, aes(fill = count),colour=NA) +
+    scale_fill_viridis(option = "A") +
+    labs(title = "Count of fire incidents for the fishnet 2015") +
+    mapTheme(),
+  
+  ggplot() +
+    geom_sf(data = fire2016_fishnet, aes(fill = count),colour=NA) +
+    scale_fill_viridis(option = "A") +
+    labs(title = "Count of fire incidents for the fishnet 2016") +
+    mapTheme(),
+  
+  ggplot() +
+    geom_sf(data = fire2017_fishnet, aes(fill = count),colour=NA) +
+    scale_fill_viridis(option = "A") +
+    labs(title = "Count of fire incidents for the fishnet 2017") +
+    mapTheme(),
+  
+  ggplot() +
+    geom_sf(data = fire2018_fishnet, aes(fill = count),colour=NA) +
+    scale_fill_viridis(option = "A") +
+    labs(title = "Count of fire incidents for the fishnet 2018") +
+    mapTheme(),
+  
+  ggplot() +
+    geom_sf(data = fire2019_fishnet, aes(fill = count),colour=NA) +
+    scale_fill_viridis(option = "A") +
+    labs(title = "Count of fire incidents for the fishnet 2019") +
+    mapTheme(),
+ncol=3)
+
+#Kernal Density By each year
+fire_ppp_2015 <- as.ppp(st_coordinates(fire2015), W = st_bbox(fire2015_fishnet))
+fire_KD_2015 <- spatstat::density.ppp(fire_ppp_2015, 1000)
+
+fire_ppp_2016 <- as.ppp(st_coordinates(fire2016), W = st_bbox(fire2016_fishnet))
+fire_KD_2016 <- spatstat::density.ppp(fire_ppp_2016, 1000)
+
+fire_ppp_2017 <- as.ppp(st_coordinates(fire2017), W = st_bbox(fire2017_fishnet))
+fire_KD_2017<- spatstat::density.ppp(fire_ppp_2017, 1000)
+
+fire_ppp_2018 <- as.ppp(st_coordinates(fire2018), W = st_bbox(fire2018_fishnet))
+fire_KD_2018 <- spatstat::density.ppp(fire_ppp_2018, 1000)
+
+fire_ppp_2019 <- as.ppp(st_coordinates(fire2019), W = st_bbox(fire2019_fishnet))
+fire_KD_2019 <- spatstat::density.ppp(fire_ppp_2019, 1000)
+
+grid.arrange( #Plot
+  as.data.frame(fire_KD_2015) %>% #2015
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire2015_fishnet)) %>%
+    aggregate(.,fire2015_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents 2015",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(), 
+  
+  as.data.frame(fire_KD_2016) %>% #2016
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire2016_fishnet)) %>%
+    aggregate(.,fire2016_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents 2016",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(), 
+  
+  as.data.frame(fire_KD_2017) %>% #2017
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire2017_fishnet)) %>%
+    aggregate(.,fire2017_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents 2017",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(), 
+  
+  as.data.frame(fire_KD_2018) %>% #2018
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire2018_fishnet)) %>%
+    aggregate(.,fire2018_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents 2018",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(), 
+  
+  as.data.frame(fire_KD_2019) %>% #2019
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fire2019_fishnet)) %>%
+    aggregate(.,fire2019_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents 2019",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(), 
+  ncol=3)
+```
+
+### By month
+```{r firecount2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+#3. Visualize by month
+#Jan
+fireJan<-
+  fire.sf %>%
+  filter(Month == 1)
+fireJan_fishnet <- 
+  fireJan %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Jan <- as.ppp(st_coordinates(fireJan), W = st_bbox(fireJan_fishnet))
+fire_KD_Jan <- spatstat::density.ppp(fire_ppp_Jan, 1000)
+
+#Feb
+fireFeb<-
+  fire.sf %>%
+  filter(Month == 2)
+
+fireFeb_fishnet <- 
+  fireFeb %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Feb <- as.ppp(st_coordinates(fireFeb), W = st_bbox(fireFeb_fishnet))
+fire_KD_Feb <- spatstat::density.ppp(fire_ppp_Feb, 1000)
+
+#Mar
+fireMar<-
+  fire.sf %>%
+  filter(Month == 3)
+
+fireMar_fishnet <- 
+  fireMar %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Mar <- as.ppp(st_coordinates(fireMar), W = st_bbox(fireMar_fishnet))
+fire_KD_Mar <- spatstat::density.ppp(fire_ppp_Mar, 1000)
+
+#Apr
+fireApr<-
+  fire.sf %>%
+  filter(Month == 4)
+
+fireApr_fishnet <- 
+  fireApr %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Apr <- as.ppp(st_coordinates(fireApr), W = st_bbox(fireApr_fishnet))
+fire_KD_Apr <- spatstat::density.ppp(fire_ppp_Apr, 1000)
+
+#May
+fireMay<-
+  fire.sf %>%
+  filter(Month == 5)
+
+fireMay_fishnet <- 
+  fireMay %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_May <- as.ppp(st_coordinates(fireMay), W = st_bbox(fireMay_fishnet))
+fire_KD_May <- spatstat::density.ppp(fire_ppp_May, 1000)
+
+#Jun
+fireJun<-
+  fire.sf %>%
+  filter(Month == 6)
+
+fireJun_fishnet <- 
+  fireJun %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Jun <- as.ppp(st_coordinates(fireJun), W = st_bbox(fireJun_fishnet))
+fire_KD_Jun <- spatstat::density.ppp(fire_ppp_Jun, 1000)
+
+#Jul
+fireJul<-
+  fire.sf %>%
+  filter(Month == 7)
+
+fireJul_fishnet <- 
+  fireJul %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Jul <- as.ppp(st_coordinates(fireJul), W = st_bbox(fireJul_fishnet))
+fire_KD_Jul <- spatstat::density.ppp(fire_ppp_Jul, 1000)
+
+#Aug
+fireAug<-
+  fire.sf %>%
+  filter(Month == 8)
+
+fireAug_fishnet <- 
+  fireAug %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Aug <- as.ppp(st_coordinates(fireAug), W = st_bbox(fireAug_fishnet))
+fire_KD_Aug <- spatstat::density.ppp(fire_ppp_Aug, 1000)
+
+#Sep
+fireSep<-
+  fire.sf %>%
+  filter(Month == 9)
+
+fireSep_fishnet <- 
+  fireSep %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Sep <- as.ppp(st_coordinates(fireSep), W = st_bbox(fireSep_fishnet))
+fire_KD_Sep <- spatstat::density.ppp(fire_ppp_Sep, 1000)
+
+#Oct
+fireOct<-
+  fire.sf %>%
+  filter(Month == 10)
+
+fireOct_fishnet <- 
+  fireOct %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Oct <- as.ppp(st_coordinates(fireOct), W = st_bbox(fireOct_fishnet))
+fire_KD_Oct <- spatstat::density.ppp(fire_ppp_Oct, 1000)
+
+#Nov
+fireNov<-
+  fire.sf %>%
+  filter(Month == 11)
+
+fireNov_fishnet <- 
+  fireNov %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Nov <- as.ppp(st_coordinates(fireNov), W = st_bbox(fireNov_fishnet))
+fire_KD_Nov <- spatstat::density.ppp(fire_ppp_Nov, 1000)
+
+#Dec
+fireDec<-
+  fire.sf %>%
+  filter(Month == 12)
+
+fireDec_fishnet <- 
+  fireDec %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fire_ppp_Dec <- as.ppp(st_coordinates(fireDec), W = st_bbox(fireDec_fishnet))
+fire_KD_Dec <- spatstat::density.ppp(fire_ppp_Dec, 1000)
+
+grid.arrange(
+  as.data.frame(fire_KD_Jan) %>% #1
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Jan",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Feb) %>% #2
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Feb",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Mar) %>% #3
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Mar",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Apr) %>% #4
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Apr",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_May) %>% #5
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents May",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Jun) %>% #6
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Jun",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Jul) %>% #7
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Jul",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Aug) %>% #8
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Aug",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Sep) %>% #9
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Sep",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Oct) %>% #10
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Oct",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Nov) %>% #11
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Nov",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  as.data.frame(fire_KD_Dec) %>% #12
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fireJan_fishnet)) %>%
+    aggregate(.,fireJan_fishnet, mean) %>%
+    ggplot() +
+    geom_sf(aes(fill=value),colour=NA) +
+    labs(title = "Kernel density of fire incidents Dec",
+         subtitle = "Radius = 1000 ft") +
+    scale_fill_viridis(option='inferno') +
+    mapTheme(),
+  ncol=3
+)
+
+```
+
+
+## Spatial units involved
+### Count by neighborhood
+```{r countNH, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# count the fire by neighborhood
+fire_neighbor <- 
+  fire.sf %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+ aggregate(., neighbor, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count))
+
+# count the hydrants by neighborhood
+hydrants_neighbor <- 
+  hydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., neighbor, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count))
+
+# plot the the fire neighborhood map & hydrants neighborhood map
+grid.arrange(ggplot() +
+               geom_sf(data =fire_neighbor, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of fire for the neighborhood") +
+               mapTheme(), 
+             ggplot() +
+               geom_sf(data =hydrants_neighbor, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of hydrants for the neighborhood") +
+               mapTheme(),ncol=2)
+```
+
+### Count by census tract
+```{r countCS, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# count the fire by tracts
+fire_tracts <- 
+  fire.sf %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., tracts, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count))
+
+# count the hydrants by tracts
+hydrants_tracts <- 
+  hydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., tracts, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count))
+
+# plot the fire tracts map &  the hydrants tracts map
+grid.arrange(ggplot() +
+               geom_sf(data =fire_tracts, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of fire for the census tracts") +
+               mapTheme(),
+             ggplot() +
+               geom_sf(data =hydrants_tracts, aes(fill = count)) +
+               scale_fill_viridis(option = "A") +
+               labs(title = "Count of hydrants for the census tracts") +
+               mapTheme(),ncol=2)
+```
+
+## Are fires statistically related to one other?
+### Kernel density
+
+Total fires 2015-2019
+```{r KD1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Total fire incidents 2015-2019
+fire_ppp <- as.ppp(st_coordinates(fire.sf), W = st_bbox(fire_fishnet))
+fire_KD <- spatstat::density.ppp(fire_ppp, 1000)
+as.data.frame(fire_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(fire_fishnet)) %>%
+  aggregate(.,fire_fishnet, mean) %>%
+  ggplot() +
+  geom_sf(aes(fill=value),colour=NA) +
+  ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+  labs(title = "Kernel density of total fire incidents 2015-2019",
+       subtitle="Radius = 1000 ft") +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+```
+
+Leading causes of fires
+```{r leadingcause2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=6, fig.width=13}
+
+fire113_fishnet <- 
+  fire113 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+fire113_ppp <- as.ppp(st_coordinates(fire113), W = st_bbox(fire113_fishnet))
+fire113_KD <- spatstat::density.ppp(fire113_ppp, 1000)
+
+fire1110_fishnet <- 
+  fire1110 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+fire1110_ppp <- as.ppp(st_coordinates(fire1110), W = st_bbox(fire1110_fishnet))
+fire1110_KD <- spatstat::density.ppp(fire1110_ppp, 1000)
+
+
+fire150_fishnet <- 
+  fire150 %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+fire150_ppp <- as.ppp(st_coordinates(fire150), W = st_bbox(fire150_fishnet))
+fire150_KD <- spatstat::density.ppp(fire150_ppp, 1000)
+
+#PLOT
+grid.arrange(
+
+             #Kernel density
+               as.data.frame(fire113_KD) %>%
+               st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+               aggregate(.,fire113_fishnet, mean) %>%
+               ggplot() +
+               geom_sf(aes(fill=value),colour=NA) +
+               ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+               labs(title = "Kernel density of NO.1 Cooking fire") +
+               scale_fill_viridis(option='inferno') +
+               mapTheme(),
+             as.data.frame(fire1110_KD) %>%
+               st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+               aggregate(.,fire1110_fishnet, mean) %>%
+               ggplot() +
+               geom_sf(aes(fill=value),colour=NA) +
+               ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+               labs(title = "Kernel density of NO.2 Building Fire") +
+               scale_fill_viridis(option='inferno') +
+               mapTheme() ,
+             as.data.frame(fire150_KD) %>%
+               st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+               aggregate(.,fire150_fishnet, mean) %>%
+               ggplot() +
+               geom_sf(aes(fill=value),colour=NA) +
+               labs(title = "Kernel density of NO.3 Outside rubbish fire") +
+               scale_fill_viridis(option='inferno') +
+               mapTheme()
+               
+               , nrow=1)
+```
+
+### Local Moran's I statistics
+```{r moranI, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+#2. Local Moran's I statistics
+fire_fishnet.nb <- poly2nb(fire_fishnet, queen=TRUE)
+fire_fishnet.weights <- nb2listw(fire_fishnet.nb, style="W", zero.policy=TRUE)
+
+fire_fishnet.localMorans <- 
+  cbind(
+    as.data.frame(localmoran(fire_fishnet$count, fire_fishnet.weights)),
+    as.data.frame(fire_fishnet, NULL)) %>% 
+  st_sf() %>%
+  dplyr::select(Fire_TotalCount = count, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z > 0)`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.05, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+vars <- unique(fire_fishnet.localMorans$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+    geom_sf(data = filter(fire_fishnet.localMorans, Variable == i), aes(fill = Value), colour=NA) +
+    scale_fill_viridis(option="inferno") +
+    labs(title=i) +
+    mapTheme()}
+#Plot
+do.call(grid.arrange,c(varList, ncol = 2, top = "Local Morans I statistics of fires 2015-2019 (P value for significant hotspots=0.05)"))
+```
+
+
+### Hotspots
+```{r hotspot, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=8, fig.width=13}
+#3. Hotspots of fire
+fire_fishnet <-
+  fire_fishnet %>% 
+  mutate(fire.isSig = ifelse(localmoran(fire_fishnet$count, 
+                                        fire_fishnet.weights)[,5] <= 0.0000001, "Statistically significant", "Not significant")) 
+#%>%
+  #mutate(fire.isSig.dist = nn_function(st_coordinates(st_centroid(fire_fishnet)),
+                                           #st_coordinates(st_centroid(
+                                            #filter(fire_fishnet, fire.isSig == 1))), 1 ))
+
+fire_fishnet <-
+  fire_fishnet %>% 
+  mutate(fire.isSig2 = ifelse(localmoran(fire_fishnet$count, 
+                                        fire_fishnet.weights)[,5] <= 0.001, "Statistically significant", "Not significant")) 
+
+fire_fishnet <-
+  fire_fishnet %>% 
+  mutate(fire.isSig3 = ifelse(localmoran(fire_fishnet$count, 
+                                        fire_fishnet.weights)[,5] <= 0.05, "Statistically significant", "Not significant")) 
+
+#Plot
+grid.arrange(
+ggplot() + 
+  geom_sf(data = fire_fishnet, aes(fill = fire.isSig),colour=NA) +
+  labs(title = "Significantly clustered fires (local hotspots)",
+       subtitle = "P value = 0.0000001") +
+  scale_fill_manual(values = c("grey", "red"), name = "Values")+
+  mapTheme(),
+
+ggplot() + 
+  geom_sf(data = fire_fishnet, aes(fill = fire.isSig2),colour=NA) +
+  labs(title = "Significantly clustered fires ",
+       subtitle = "P value = 0.001") +
+  scale_fill_manual(values = c("grey", "red"), name = "Values")+
+  mapTheme(),
+
+ggplot() + 
+  geom_sf(data = fire_fishnet, aes(fill = fire.isSig3),colour=NA) +
+  labs(title = "Significantly clustered fire",
+       subtitle = "P value = 0.05") +
+  scale_fill_manual(values = c("grey", "red"), name = "Values")+
+  mapTheme(),
+nrow=1)
+
+```
+
+
+## More on hydrants
+### Kernel Density
+```{r KD_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Kernel density of hydrants
+hydrants_ppp <- as.ppp(st_coordinates(hydrants), W = st_bbox(hydrants_fishnet))
+hydrants_KD <- spatstat::density.ppp(hydrants_ppp, 1000)
+as.data.frame(hydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+  aggregate(.,hydrants_fishnet, mean) %>%
+  ggplot() +
+  geom_sf(aes(fill=value),colour=NA) +
+  ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+  labs(title = "Kernel density of fire hydrants") +
+  scale_fill_viridis() +
+  mapTheme()
+```
+
+
+### Nearest neighbor distance from fires to hydrants
+```{r NND_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#NND to hydrants
+fire_fishnet$hydrants.nn =
+  nn_function(st_coordinates(st_centroid(fire_fishnet)), st_coordinates(hydrants), 10)
+
+ggplot() +
+  geom_sf(data=fire_fishnet, aes(fill=hydrants.nn),colour=NA) +
+  scale_fill_viridis() +
+  labs(title="Nearest Neighbor Distance to 10 Hydrants near each fire") +
+  mapTheme()
+```
+
+### Feature engineering
+```{r FE_hydrants, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# Feature engineering
+#Add age
+inspect$age<-2020-inspect$YEAR_INSTA
+
+#Categorize age
+inspect <- 
+  inspect %>%
+  mutate(How_Old = case_when(
+    age >= 60 & age < 2020  ~ "Very Old",
+    age >= 0 & age <=5  ~ "New",
+    age > 5 & age<=10 ~ "Almost New",
+    age > 10 & age<=30 ~ "Mid Age",
+    age > 30 & age<= 40 ~ "Almost Old",
+    age > 40 & age <60 ~ "Old",
+    age<0|age=="NA" ~ "Invalid data"))
+
+inspect <- 
+  inspect %>%
+  mutate(How_Well = case_when(
+    DEFECTS ==0  ~ "No defects",
+    DEFECTS > 0 & DEFECTS <=5  ~ "Several",
+    DEFECTS > 5 & DEFECTS<=10 ~ "Some",
+    DEFECTS > 10 & DEFECTS<=20~ "Some more",
+    DEFECTS >20 ~ "A lot"))
+
+inspect %>%
+  group_by(How_Old) %>%
+  dplyr::summarize(count = n()) %>%
+  ggplot(aes(reorder(How_Old, -count), count)) +
+  geom_bar(stat = "identity", colour = "white", fill="grey40") +
+  labs(title = "Age distribution for hydrants",
+       x="How old for hydrants", y="Count") +
+  plotTheme() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+inspect %>%
+  group_by(How_Well) %>%
+  dplyr::summarize(count = n()) %>%
+  ggplot(aes(reorder(How_Well, -count), count)) +
+  geom_bar(stat = "identity", colour = "white", fill="grey40") +
+  labs(title = "Defects condition for hydrants",
+       x="How many", y="Count") +
+  plotTheme() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Density of old and bad hydrants
+```{r KD_hydrants2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+OldHydrants<-
+ inspect %>%
+  filter(How_Old == "Very Old"|How_Old == "Old")
+
+  
+OldHydrants_fishnet <- 
+  OldHydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet)/24), size=nrow(fishnet), replace = TRUE))
+
+library(raster)
+OldHydrants_ppp <- as.ppp(st_coordinates(OldHydrants), W = st_bbox(OldHydrants_fishnet))
+OldHydrants_KD <- spatstat::density.ppp(OldHydrants_ppp, 1000)
+
+as.data.frame(OldHydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(OldHydrants_fishnet)) %>%
+  aggregate(.,OldHydrants_fishnet, mean) %>%
+  ggplot() +
+  geom_sf(aes(fill=value),colour=NA) +
+  ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+  labs(title = "Kernel density of OLD hydrants") +
+  scale_fill_viridis() +
+  mapTheme()
+
+#===========
+BadHydrants<-
+  inspect %>%
+  filter(How_Well == "A lot"|How_Well == "Some more")
+
+# Fishnet
+BadHydrants_fishnet <- 
+  BadHydrants %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet)/24), size=nrow(fishnet), replace = TRUE))
+
+# KD
+BadHydrants_ppp <- as.ppp(st_coordinates(BadHydrants), W = st_bbox(BadHydrants_fishnet))
+BadHydrants_KD <- spatstat::density.ppp(BadHydrants_ppp, 1000)
+
+as.data.frame(BadHydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(BadHydrants_fishnet)) %>%
+  aggregate(.,BadHydrants_fishnet, mean) %>%
+  ggplot() +
+  geom_sf(aes(fill=value),colour=NA) +
+  ##geom_sf(data = sample_n(fire.sf, 1500), size = .5) +
+  labs(title = "Kernel density of BAD hydrants") +
+  scale_fill_viridis() +
+  mapTheme()
+```
+
+### Correlation: hydrants and fires
+```{r KD_hydrants_c1, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#===========
+OH_KD_temp<-
+as.data.frame(OldHydrants_KD)%>%
+    st_as_sf(coords = c("x", "y"), crs = st_crs(OldHydrants_fishnet)) %>%
+    aggregate(.,OldHydrants_fishnet, mean)
+names(OH_KD_temp)[names(OH_KD_temp) == 'value'] <- 'OH_KD_val'
+
+BH_KD_temp<-
+  as.data.frame(BadHydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(BadHydrants_fishnet)) %>%
+  aggregate(.,BadHydrants_fishnet, mean)
+names(BH_KD_temp)[names(BH_KD_temp) == 'value'] <- 'BH_KD_val'
+
+Fire_KD_temp<-
+as.data.frame(fire_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(fire_fishnet)) %>%
+  aggregate(.,fire_fishnet, mean)
+names(Fire_KD_temp)[names(Fire_KD_temp) == 'value'] <- 'Fire_KD_val'
+
+Hydrants_KD_temp<-
+as.data.frame(hydrants_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(hydrants_fishnet)) %>%
+  aggregate(.,hydrants_fishnet, mean)
+names(Hydrants_KD_temp)[names(Hydrants_KD_temp) == 'value'] <- 'Hydrants_KD_val'
+#===========
+
+#Spatial join one by one
+net1 <-
+  OH_KD_temp%>%
+  st_join(., fishnet,join=st_equals)
+
+net2 <-
+  Hydrants_KD_temp%>%
+  st_join(., net1,join=st_equals)
+
+net3 <-
+  Fire_KD_temp%>%
+  st_join(., net2, join=st_equals)
+
+net4 <-
+  BH_KD_temp%>%
+  st_join(., net3, join=st_equals)
+
+#2. 
+qplot(net4$Fire_KD_val,
+      net4$Hydrants_KD_val, 
+      main="Correlation-fire kernel density and hydrants kernel density",
+      xlab='Fire',
+      ylab='Hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE)
+
+cor.test(net4$Fire_KD_val,
+         net4$OH_KD_val)
+```
+
+```{r KD_hydrants_c2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#1. 
+qplot(net4$Fire_KD_val,
+      net4$OH_KD_val, 
+      main="Correlation between fire kernel density and OLD hydrants kernel density",
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1/5),
+      se=FALSE)
+cor.test(net4$Fire_KD_val,
+         net4$OH_KD_val)
+
+#3. 
+qplot(Fire_KD_val,
+      BH_KD_val, 
+      main="Correlation-fire kernel density and BAD hydrants kernel density",
+      xlab='Fire',
+      ylab='Hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net4)
+
+cor.test(net4$Fire_KD_val,
+         net4$BH_KD_val)
+
+#4. 
+qplot(OH_KD_val,
+      BH_KD_val, 
+      main="Correlation-OLD hydrants kernel density and BAD hydrants kernel density",
+      xlab='Old hydrants',
+      ylab='Bad hydrants',
+      geom=c('point','smooth'),
+      method='lm',
+      alpha=I(1 / 5),
+      se=FALSE,
+      data=net4)
+
+cor.test(net4$OH_KD_val,
+         net4$BH_KD_val)
+```
+
+
+
+## Are L&I Violations related to Fires? 
+Focusing on 3 currently: Unsafe Strucutres, Lacking Smoke Alarms, Uncertified Fire Extinguishers. Will add more and filter to 2015-2019 dates to match with Fire Data. 
+```{r unsafeStructures, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+unsafe_structureJSON<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)")
+unsafeDF <- 
+  as.data.frame(unsafe_structureJSON$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() + 
+  geom_sf(data=unsafeDF) +
+  geom_sf(data=tracts) +
+  geom_point(data=unsafeDF,
+             aes(x=X,y=Y), size=0.2, color='red') +
+  labs(title="Unsafe Buildings 2007-2020",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+# FISNET PLOT 
+
+unsafeStructure_fishnet <- 
+  unsafeDF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+
+unsafe<- ggplot() +
+  geom_sf(data = unsafeStructure_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(direction=-1,option="A") +
+  labs(title="Count of Unsafe Buildings ALL code=PM15-108.1 ",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+```
+
+```{r Lack Smoke Alarm, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# lack smoke alarm 
+lack_smokeAlarm<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-907.3/20%27)")
+lack_smokeAlarm_DF<-as.data.frame(lack_smokeAlarm$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() +
+  geom_sf(data=lack_smokeAlarm_DF) +
+  geom_sf(data=tracts) +
+  geom_point(data=lack_smokeAlarm_DF,
+             aes(x=X,y=Y), size=0.2, color='red') +
+  labs(title="Lack Smoke Alarm ALL, code=FC-907.3/20",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+LackSmokeAlarm_fishnet <- 
+  lack_smokeAlarm_DF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+smokeAlm<- ggplot() +
+  geom_sf(data = LackSmokeAlarm_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(option="A",direction=-1) +
+  labs(title="Count of Lack Smoke Alarm ALL, code=FC-907.3/20",
+       subtitle=paste("Source: L&I Violations", sep="; "))+
+  mapTheme()
+
+
+```
+
+```{r Uncertified Fire Extinguishers, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+# Fire extinguisher not certifies 
+fire_ext_notcertified<- fromJSON("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-906.2/2%27)")
+fire_ext_notcertified_DF<-as.data.frame(fire_ext_notcertified$rows) %>%
+  dplyr::select(censustract,violationdate,violationdescription, status, casestatus,casepriority, geocode_x,geocode_y) %>%
+  na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+  st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+  mutate(
+    X = st_coordinates(.)[,1],
+    Y = st_coordinates(.)[,2])
+
+ggplot() +
+  geom_sf(data=fire_ext_notcertified_DF) +
+  geom_sf(data=tracts) +
+  geom_point(data=fire_ext_notcertified_DF,
+             aes(x=X,y=Y), size=0.1, color='red') +
+  labs(title="Fire Extinguisher Needs Inspection (ALL), code=FC-906.2/2",
+       subtitle=paste("Source: L&I Violations", sep="; ")) +
+  mapTheme()
+
+fireExtNotCertified_fishnet <- 
+  fire_ext_notcertified_DF %>% 
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+fireExt<-ggplot() +
+  geom_sf(data = fireExtNotCertified_fishnet, aes(fill = count),colour=NA) +
+  scale_fill_viridis(option="A", direction=-1) +
+  labs(title="Count of Fire Extinguisher Lacking Inspection (ALL), code=FC-906.2/2",
+       subtitle=paste("Source: L&I Violations", sep="; "))+
+  mapTheme()
+```
+
+### Fishnet counts of the 3 Violations vs Fire count
+```{r compile maps, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center',fig.height=10, fig.width=14}
+#Map the fire fishnet map (2015-2019) (changed the color direction)
+fire<-ggplot() +
+  geom_sf(data = fire_fishnet, aes(fill = count), color=NA) +
+  scale_fill_viridis(option = "A", direction=-1) +
+  labs(title = "Count of fire incidents for the fishnet 2015-2019") +
+  mapTheme()
+grid.arrange(fire,unsafe, smokeAlm, fireExt, nrow = 2, ncol = 2)
+```
+
+## Fire and other features
+### Zoning type
+```{r relation2, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#Explore the relationship between zoning type and fire count#####
+#load the zoning type data
+
+landuse <- st_read("http://data-phl.opendata.arcgis.com/datasets/e433504739bd41049de5d8f4a22d34ba_0.geojson") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+
+#join the landuse data to the fire data
+fire.sf.zone <- 
+  fire.sf %>%
+  st_join(.,landuse,join=st_intersects, left= TRUE) %>%
+  dplyr::select(inci_no,C_DIG1DESC)%>%
+  na.omit()
+
+# visualize the relationship between zoning type and fire count
+ggplot(fire.sf.zone, aes(reorder_size(C_DIG1DESC)))+  
+  geom_bar() +
+  labs(title = "Count of fire incidents by zoning type")+
+  labs(y="Count", x = "Zoning type")+
+  theme(axis.text.x = element_text(angle = 60))
+
+```
+
+
+### Zipcode
+```{r relation3, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+ggplot(fire.sf, aes(reorder_size(zip))) + 
+  geom_bar() +
+  labs(y="Count", x = "Zipcode")+
+  labs(title="Count of fire incidents by zipcode")+
+  theme(axis.text.x = element_text(angle = 60))
+```
+
+
+### Hydrant density and fire density
+```{r relation4, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+#Explore the relationship between hydrant density and fire density#####
+fire_hydrant_fishnet <- merge(x=as.data.frame(fire_fishnet),y=as.data.frame(hydrants_fishnet),by="uniqueID",all=TRUE)
+ggplot(data=fire_hydrant_fishnet,aes(x=count.y,y=count.x)) +
+  geom_point(colour ="#006699",size=0.8) +
+  geom_smooth(method = "lm", se=F, colour = "#336699") +
+  labs(title = "Fire counts as a function of Hydrants counts") +
+  labs(y="Fire count", x = "Hydrant count")+
+  plotTheme()
+```
+
+
