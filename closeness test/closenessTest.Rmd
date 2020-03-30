@@ -1,0 +1,374 @@
+---
+title: "Closeness Test"
+author: "Leanne Chan"
+date: "2/27/2020"
+output: html_document
+---
+
+```{r setup}
+
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+library(readr)
+library(ggplot2)
+library(gganimate)
+library(scales)
+library(dplyr)
+library(gifski)
+library(png)
+library(ggsn)
+library(ggpmisc) # to get R squared
+
+# for parallel 
+library(snow)
+library(parallel)
+library(doParallel)
+
+##### SETUP #####
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+
+readData<-function(link){
+  raw<-fromJSON(link)
+  formated<- as.data.frame(raw$rows) %>%
+    dplyr::select(censustract,violationdate,violationdescription, status, casestatus, casepriority, geocode_x,geocode_y) %>%
+    mutate('Year' = year(ymd_hms(violationdate)))%>%
+    na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+    st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+    mutate(
+      X = st_coordinates(.)[,1],
+      Y = st_coordinates(.)[,2])
+  return(formated)
+}
+
+aggViolation<-function(violation, year, fishnet, KD_Fire){
+  data<-violation[violation$Year == year,]
+  # Step 1: Get fishnet count of that violation 
+  fishnetCount<-data %>% 
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  # Step 2: Get Kernel Density
+  name<-paste(year, "KD", sep="_")
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(fishnet))
+  KD_Viol <- as.data.frame(spatstat::density.ppp(point_ppp, 1000)) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnet)) %>%
+    aggregate(.,fishnet, mean)%>%plyr::rename(.,c('value' = name))
+  
+  
+  # Step 3: Join the  KD fire to the kernel density of violation to count of Violation
+  # also make sure the geometry is a centroid 
+  all_aggregates <- st_join(KD_Fire, KD_Viol %>% dplyr::select(name) %>% st_centroid(.))%>%
+  st_join(., fishnetCount%>% dplyr::select(count) %>% st_centroid(.))%>%st_centroid(.)
+
+  # Step 4: Add avg 5 nearest neighbor distances
+  all_aggregates$nn5 =
+      nn_function(st_coordinates(all_aggregates), st_coordinates(data), 5) # avg of 5 nearest neighbors
+  
+  return(all_aggregates)
+} 
+
+
+## nearest neighbor function
+nn_function <- function(measureFrom,measureTo,k) {
+  
+  nn <- FNN::get.knnx(measureTo, measureFrom, k)$nn.dist
+  
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(value = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr ::select(-thisPoint)
+  
+  return(output)  
+}
+
+```
+
+
+```{r read in data,fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+philly_whole<- st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson") %>%
+  st_set_crs(4326) %>%
+  na.omit() %>%
+  st_transform(2272)
+
+fire_excel<-read_excel('/Users/leann/OneDrive/Desktop/MUSA 800/Data/2015 to 2019 fires for u of pa report run 1620.xlsx')
+fire.sf <- 
+  fire_excel%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+fire.sf <- 
+  st_intersection(fire.sf, philly_whole)
+fire.sf <- 
+  fire.sf %>%
+  mutate(date=dmy(alm_date),
+         Year=year(date),
+         Month=month(date))
+fire_18 <- fire.sf[fire.sf$Year==2018,]
+
+# philly no water
+
+philly<- st_read('/Users/leann/OneDrive/Desktop/MUSA 800/philly_no_water.shp') %>%st_transform(2272)
+
+
+```
+
+
+```{r violations }
+unsafe_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)") 
+ID_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-110.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+ALM_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-907.3/20%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+
+
+# get just 2018 name and geometry
+unsafe_18 <- unsafe_structures[unsafe_structures$Year==2018,]
+ID_18 <- ID_structures[ID_structures$Year==2018,]
+ALM_18 <- ALM_structures[ALM_structures$Year==2018,]
+
+# dataframes to store results
+rnd_viol_p_results_total <- NULL
+rnd_viol_vec_total <- NULL
+viol_mean_NN <- NULL
+
+viol_names <-list('Unsafe Structure', 'Imminently Dangerous Buildings', 'Lacking Propoer Smoke Alarms')
+viol_list <- list(unsafe_18, ID_18, ALM_18)
+
+
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoParallel(cl)
+for(j in seq_along(viol_list)){
+  viol_desc <-viol_list[[j]]
+# get nearest neigbor distance to observed
+  viol_fire_NN <- nn_function(st_coordinates(viol_desc),st_coordinates(fire2018), k_nearest_nb)
+  viol_fire_NN <- mean(viol_fire_NN$value)
+# generate random simulations
+  rnd_viol_results <- foreach(i = seq_len(simulations),
+  .packages = c('sf', 'dplyr', 'FNN', 'tibble', 'tidyr'),
+  .combine  = c) %dopar% {
+    cat(i,"\n")
+    # get random samples, calculate distance
+    viol_fire_NN_rnd <- sf::st_sample(philly, nrow(viol_desc)) %>%
+    st_coordinates(.) %>%
+    nn_function(., st_coordinates(fire2018), k_nearest_nb)
+  }
+# store requests
+# p values of this particular request
+  rnd_viol_p_results <- data.frame(p =map_dbl(rnd_viol_results,function(x)1-ecdf(x)(viol_fire_NN)),
+  Feature = viol_names[[j]])
+  # add this to the list with all requests
+  rnd_viol_p_results_total <- rbind(rnd_viol_p_results_total, rnd_viol_p_results)
+  # some vector
+  rnd_viol_vec <- data.frame(dist = as.numeric(map_dbl(rnd_viol_results, mean)), Feature = viol_names[[j]])
+  # add to total
+  rnd_viol_vec_total <- rbind(rnd_viol_vec_total, rnd_viol_vec)
+  # store the observed mean nn (to be plotted as line)
+  viol_mean_NN <- rbind(viol_mean_NN, data.frame(mean = viol_fire_NN, Feature =viol_names[[j]]))
+}
+
+# Stop parallel cluster
+stopCluster(cl)
+
+rnd_viol_vec_total$Feature <- factor(rnd_viol_vec_total$Feature ,levels = as.character(arrange(viol_mean_NN,mean)$Feature))
+
+
+VIOL_FIRE_VS_NN_plot <- ggplot(data = rnd_viol_vec_total, aes(x = dist, group = Feature, fill =
+                                                              Feature)) +
+  geom_histogram(bins = 50) +
+  geom_vline(data = viol_mean_NN, aes(xintercept = mean), size = 2) +
+  #scale_x_continuous(breaks=seq(400,4500,200), labels = seq(400,4500,200)) +
+  facet_wrap(~Feature, ncol = 1, scales = "free_y") +
+  labs(x = paste0("Mean NN Distance (k = ",k_nearest_nb,")"),
+  title = "L&I Violations"
+  #,caption = "Figure 5.8"
+  ) +
+  scale_fill_viridis_d() +
+  plotTheme() +
+  theme(
+  legend.position = "none",
+  strip.text = element_text(size = 11, family = "sans", face = "plain", hjust = 0),
+  strip.background = element_rect(fill = "white")
+  )
+
+VIOL_FIRE_VS_NN_plot
+```
+
+
+```{r 311 requests}
+req <- read.csv('/Users/leann/OneDrive/Desktop/MUSA 800/Data/public_cases_fc.csv')
+req <-req %>%
+  mutate(Year=year(requested_datetime)) %>%
+  dplyr::select(lon,lat,service_name,Year)%>%
+  na.omit()%>%
+  st_as_sf(.,coords=c("lon","lat"),crs=4326)%>%
+  st_transform(., crs=2272)
+
+hydrant_Down18 <- req %>%
+  filter(service_name=="Hydrant Knocked Down (No Water)" & Year==2018)
+hydrant_req <- req %>%
+  filter(service_name=="Hydrant Request" & Year==2018)
+smoke_dector18 <- req%>%
+  filter(service_name=="Smoke Detector" & Year==2018)
+complainfire18 <- req %>%
+  filter(.,service_name=="Complaints against Fire or EMS" & Year==2018)
+FireRes_or_Com18 <- req %>%
+  filter(service_name=="Fire Residential or Commercial" & Year==2018)
+
+
+# dataframes to store results
+rnd_req_p_results_total <- NULL
+rnd_req_vec_total <- NULL
+req_mean_NN <- NULL
+
+req_names <-list('Hydrant Down', 'Hydrant Request', 'Smoke Detector', 'Comlplaint against Fire/EMS Services', 'Residential and Commercial Fires')
+req_list <- list(hydrant_Down18, hydrant_req, smoke_dector18, complainfire18, FireRes_or_Com18)
+
+
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoParallel(cl)
+for(j in seq_along(req_list)){
+  req_desc <-req_list[[j]]
+# get nearest neigbor distance to observed
+  req_fire_NN <- nn_function(st_coordinates(req_desc),st_coordinates(fire2018), k_nearest_nb)
+  req_fire_NN <- mean(req_fire_NN$value)
+# generate random simulations
+  rnd_req_results <- foreach(i = seq_len(simulations),
+  .packages = c('sf', 'dplyr', 'FNN', 'tibble', 'tidyr'),
+  .combine  = c) %dopar% {
+    cat(i,"\n")
+    # get random samples, calculate distance
+    req_fire_NN_rnd <- sf::st_sample(philly, nrow(req_desc)) %>%
+    st_coordinates(.) %>%
+    nn_function(., st_coordinates(fire2018), k_nearest_nb)
+  }
+# store requests
+# p values of this particular request
+  rnd_req_p_results <- data.frame(p =map_dbl(rnd_req_results,function(x)1-ecdf(x)(req_fire_NN)),
+  Feature = req_names[[j]])
+  # add this to the list with all requests
+  rnd_req_p_results_total <- rbind(rnd_req_p_results_total, rnd_req_p_results)
+  # some vector
+  rnd_req_vec <- data.frame(dist = as.numeric(map_dbl(rnd_req_results, mean)), Feature = req_names[[j]])
+  # add to total
+  rnd_req_vec_total <- rbind(rnd_req_vec_total, rnd_req_vec)
+  # store the observed mean nn (to be plotted as line)
+  req_mean_NN <- rbind(req_mean_NN, data.frame(mean = req_fire_NN, Feature =req_names[[j]]))
+}
+
+# Stop parallel cluster
+stopCluster(cl)
+
+rnd_req_vec_total$Feature <- factor(rnd_req_vec_total$Feature ,levels = as.character(arrange(req_mean_NN,mean)$Feature))
+
+
+REQ_FIRE_VS_NN_plot <- ggplot(data = rnd_req_vec_total, aes(x = dist, group = Feature, fill =
+                                                              Feature)) +
+  geom_histogram(bins = 50) +
+  geom_vline(data = req_mean_NN, aes(xintercept = mean), size = 2) +
+  #scale_x_continuous(breaks=seq(400,4500,200), labels = seq(400,4500,200)) +
+  facet_wrap(~Feature, ncol = 1, scales = "free_y") +
+  labs(x = paste0("Mean NN Distance (k = ",k_nearest_nb,")"),
+  title = "311 Request factors closeness test"
+  #,caption = "Figure 5.8"
+  ) +
+  scale_fill_viridis_d() +
+  plotTheme() +
+  theme(
+  legend.position = "none",
+  strip.text = element_text(size = 11, family = "sans", face = "plain", hjust = 0),
+  strip.background = element_rect(fill = "white")
+  )
+
+REQ_FIRE_VS_NN_plot
+
+```
+
+
+
