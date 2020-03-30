@@ -1,0 +1,471 @@
+---
+title: "Residential Property Features and Land Use Data"
+author: "Leanne Chan"
+date: "3/23/2020"
+output: html_document
+---
+
+# Set up 
+```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)                
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+library(plyr)
+library(ggpmisc)
+
+```
+
+```{r map theme}
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+qBr <- function(df, variable, rnd) {
+  if (missing(rnd)) {
+    as.character(quantile(round(df[[variable]],0),
+                          c(.01,.2,.4,.6,.8), na.rm=T))
+  } else if (rnd == FALSE | rnd == F) {
+    as.character(formatC(quantile(df[[variable]]), digits = 3),
+                          c(.01,.2,.4,.6,.8), na.rm=T)
+  }
+}
+
+q5 <- function(variable) {as.factor(ntile(variable, 5))}
+palette5 <- c("#25CB10", "#5AB60C", "#8FA108",   "#C48C04", "#FA7800")
+
+```
+
+```{r philly and fire data, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# city limits
+philly <- 
+  st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson")%>%st_transform(crs=2272)
+
+st_crs(philly)
+
+
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+
+
+#### Fire data
+fire_excel<-read_excel('C:/Users/leann/OneDrive/Desktop/MUSA 800/Data/2015 to 2019 fires for u of pa report run 1620.xlsx')
+fire.sf <- 
+  fire_excel%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)
+fire.sf <- 
+  st_intersection(fire.sf, philly)
+fire.sf <- 
+  fire.sf %>%
+  mutate(date=dmy(alm_date),
+         Year=year(date),
+         Month=month(date))
+
+## kernel density of fires by year 
+kernelDensity <- function(pointData, year, fishnetGrid, name){
+  data<-pointData %>%filter(Year == year)
+  count<- data %>% #get count by fishnet
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnetGrid, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnetGrid) / 24), size=nrow(fishnetGrid), replace = TRUE))
+  
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(count))
+  KD <- spatstat::density.ppp(point_ppp, 1000)
+  
+  KD_dataframe<-as.data.frame(KD) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnetGrid)) %>%
+    aggregate(.,fishnetGrid, mean)%>%plyr::rename(.,c('value' = name))
+    
+  return(KD_dataframe)
+}
+
+f18_KD <- kernelDensity(fire.sf, 2018, fishnet, 'Fire18KD')
+f19_KD <- kernelDensity(fire.sf, 2019, fishnet, 'Fire19KD')
+```
+
+# Residential Building Data
+```{r get OPA data residential only}
+raw<-fromJSON('https://phl.carto.com/api/v2/sql?q=SELECT%20census_tract,%20category_code,%20market_value,%20%20parcel_number,%20sale_price,%20total_area,%20total_livable_area,%20year_built,%20zip_code,%20ST_Y(the_geom)%20AS%20lat,%20ST_X(the_geom)%20AS%20lng%20FROM%20opa_properties_public%20WHERE%20category_code%20=%20%271%27')
+formated<- as.data.frame(raw$rows)
+
+# sum(is.na(formated$sale_price)) # none missing but a lot of 1s. 
+# sum(is.na(formated$market_value)) #290 missing
+# sum(is.na(formated$year_built)) # 2 missing
+# sum(is.na(formated$total_livable_area)) # 2 missing
+# sum(is.na(formated$total_area))
+# sum(is.na(formated$census_tract))
+# sum(is.na(formated$parcel_number))
+# sum(is.na(formated$zip_code))
+# sum(formated$sale_price==1) #122394
+# sum(formated$market_value==1) #0
+# sum(formated$market_value==0) #69
+# sum(formated$total_livable_area==0) #463
+# sum(formated$total_area==0) # 33609
+formated <- na.omit(formated)
+
+final_data <-formated%>%
+   dplyr::filter(formated$total_livable_area != 0 & formated$market_value != 0 & formated$year_built!='0000')%>%
+  dplyr::select(market_value, total_livable_area, year_built, census_tract, zip_code, parcel_number, lat , lng) %>%na.omit(., cols=c("lng", "lat"))%>%
+    st_as_sf(coords = c("lng", "lat"), crs = 4326) %>%
+  st_transform(crs=2272)%>%
+    mutate(
+      X = st_coordinates(.)[,1],
+      Y = st_coordinates(.)[,2],
+      val_per_size = market_value/total_livable_area,
+      year_built = as.numeric(year_built),
+    )
+
+# more mutate for the year built
+final_data<- final_data%>%mutate(year_cat=  cut2(final_data$year_built, c(1650, 1700, 1750, 1800, 1850, 1900, 1950, 2000, 2020)), building_age = 2020-year_built)
+```
+
+```{r house value data}
+values_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = final_data, aes(colour = q5(val_per_size)), show.legend = "point", size = .5) +
+  scale_colour_viridis_d(option='inferno',
+                         direction=-1,
+                      labels=qBr(final_data,"val_per_size"),
+                      name="Quintile\nBreaks") +
+  labs(title = "House Values in Philadelphia",
+       subtitle='House Values= market value/total livable area.\nData from Office of Property Assesments.') +
+  mapTheme()
+
+values_plot
+
+# # continous scale -- NOPE, its too skewed.
+# values_plot_C<-ggplot() + 
+#   geom_sf(data=philly)+
+#   geom_sf(data = final_data, aes(color=val_per_size), show.legend = "point", size = .5) +
+#   scale_colour_viridis(option='inferno',
+#                          direction=-1,
+#                       name="Continuous Scale") +
+#   labs(title = "House Values in Philadelphia", subtitle='House Values= market value/total livable area.\nData from Office of Property Assesments.') +
+#   mapTheme()
+# 
+# values_plot_C
+```
+
+```{r year built data}
+#built_year discrete
+year_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = final_data, aes(colour = final_data$year_cat), show.legend = "point", size = .5) +
+  scale_colour_viridis_d(option = 'inferno', name="50 Year Breaks") +
+  labs(title = "Year Built of Residential Houses in Philadelphia", subtitle='Data from Office of Property Assesments.') + mapTheme()
+
+year_plot
+
+# age instead continous
+age_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = final_data, aes(colour = final_data$building_age), show.legend = "point", size = .5) +
+  scale_colour_viridis(option = 'inferno', name="Building Age", direction=-1) +
+  labs(title = "Age of Residential Houses in Philadelphia", subtitle='Data from Office of Property Assesments.') + mapTheme()
+
+age_plot
+
+```
+
+```{r aggregte to fishnet}
+# Mean value of houses and age of houses per fishnet 
+fishnet_meanVal<-final_data %>% 
+    dplyr::select('val_per_size') %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, mean)%>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))%>%
+  mutate(val_per_size=replace_na(val_per_size,0))
+
+fishnet_medianAge<-final_data %>% 
+    dplyr::select('building_age') %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, median)%>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))%>%
+  mutate(building_age=replace_na(building_age,0))
+
+#### PLOTS 
+## Value plot 
+
+houseVal_fishnet_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = fishnet_meanVal, aes(colour=val_per_size)) +
+  scale_colour_viridis(option='inferno',
+                         direction=-1,
+                      name="Average Value Per Size Houses") +
+  labs(title = "Average House Values in Philadelphia", subtitle='Values are aggregated by 800ft grid cells.\nData from Office of Property Assesments.') +
+  mapTheme()
+
+houseVal_fishnet_plot
+
+### Age plot 
+houseAge_fishnet_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = fishnet_medianAge, aes(colour=building_age)) +
+  scale_colour_viridis(option='inferno',
+                         direction=-1,
+                      name="Median Age of Houses") +
+  labs(title = "Median House Age in Philadelphia", subtitle='Ages are aggregated by 800ft grid cells.\nData from Office of Property Assesments.') +
+  mapTheme()
+
+houseAge_fishnet_plot
+
+```
+
+The code here joins the aggregated Mean House Values and Median age to the fishnet. 
+```{r aggregate to fire}
+
+fishnet_final_data<-st_join(fishnet_meanVal, fishnet_medianAge %>% dplyr::select('building_age') %>% st_centroid(.))
+
+fishnet_fireKD<-st_join(f19_KD, f18_KD %>% st_centroid(.))
+
+fishnet_data_fire<-st_join(fishnet_final_data, fishnet_fireKD %>% st_centroid(.))
+
+```
+
+```{r plot with fire, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#### SCATTER PLOTS ### 
+houseData_2018<-fishnet_data_fire%>%
+  dplyr::select('Fire18KD', 'building_age', 'val_per_size')%>%
+  st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)%>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 2, scales = "free") + labs(title = 'Residential Property Data',subtitle = '2018 Fire Data')
+
+
+houseData_2019<-fishnet_data_fire%>%
+  dplyr::select('Fire19KD', 'building_age', 'val_per_size')%>%
+  st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)%>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 2, scales = "free") + labs(subtitle = '2019 Fire Data')
+
+
+
+grid.arrange(houseData_2018, houseData_2019, ncol=1, top="Kernel Density of Fires to Property Data*;\n Source: OPA Violations", bottom='*: Property Data is from past 5 years as assessment date data was unavailable.')
+
+
+```
+
+# Land use Data 
+```{r land use data}
+landUse<-st_read('C:/Users/leann/OneDrive/Desktop/MUSA 800/Data/Land_Use')%>%st_transform(crs=2272)
+
+landUse<-landUse%>%mutate(C_DIG1DESC = as.factor(C_DIG1DESC),
+                                  C_DIG1 = as.numeric(C_DIG1))%>%
+  mutate(is_residential = case_when(
+    C_DIG1==1 ~ 1,
+    C_DIG1!=1 ~ 0
+  ),
+  is_commercial=case_when(
+    C_DIG1==2~1,
+    C_DIG1!=2~0
+  ),
+  is_industrial = case_when(
+    C_DIG1==3 ~1,
+    C_DIG1!=3~0,
+  ))
+  
+class(landUse$is_residential)
+summary(landUse)
+sum(landUse$C_DIG1==1)
+
+```
+
+```{r land use plot, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+landuseforplot<-landUse%>%mutate(is_residential=as.factor(is_residential),
+                                 is_commercial=as.factor(is_commercial),
+                                 is_industrial=as.factor(is_industrial))
+
+
+residential_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = landuseforplot, aes(colour=landuseforplot$is_residential)) +
+  scale_colour_viridis_d(option = 'inferno', name="Residential", labels=c('No', 'Yes')) +
+  labs(title = "Land Uses in Philadelphia", subtitle='Data from Philadelphia Department of Planning and Development.') + mapTheme()
+
+
+commercial_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = landuseforplot, aes(colour = landuseforplot$is_commercial)) +
+  scale_colour_viridis_d(option = 'inferno', name="Commercial", labels=c('No', 'Yes')) +
+  labs(title = "Land Uses in Philadelphia", subtitle='Data from Philadelphia Department of Planning and Development.') + mapTheme()
+
+
+industrial_plot<-ggplot() + 
+  geom_sf(data=philly)+
+  geom_sf(data = landuseforplot, aes(colour = landuseforplot$is_industrial)) +
+  scale_colour_viridis_d(option = 'inferno', name="Industrial", labels=c('No', 'Yes')) +
+  labs(title = "Land Uses in Philadelphia", subtitle='Data from Philadelphia Department of Planning and Development.') + mapTheme()
+
+
+grid.arrange(residential_plot, commercial_plot, industrial_plot, ncol=3, top="Land Uses in Philadelphia")
+
+```
+
+```{r landuse fishnet}
+# since if parcel is residential is 1, the mean is the percent
+fishnet_residential<-landUse %>% 
+    dplyr::select(is_residential) %>%
+    mutate(count = 1) %>%
+    aggregate(., fishnet, mean)%>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE),
+           percent_residential = is_residential)
+
+fishnet_commercial<-landUse %>% 
+    dplyr::select(is_commercial) %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, mean)%>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE),
+           percent_commercial = is_commercial)
+
+fishnet_industrial<-landUse %>% 
+    dplyr::select(is_industrial) %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, mean)%>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE),
+           percent_industrial = is_industrial)
+
+```
+
+```{r aggregate landuse to fishnet}
+# add percent residential and percent industrial
+fishnet_data_fire<-st_join(fishnet_data_fire, fishnet_residential 
+                             %>% dplyr::select('percent_residential')
+                             %>% st_centroid(.)%>%st_join(., fishnet_industrial
+          %>% dplyr::select('percent_industrial')
+          %>% st_centroid(.)%>%st_join(., fishnet_commercial
+          %>% dplyr::select('percent_commercial')
+          %>% st_centroid(.))))
+
+```
+
+```{r landuse plot with fire, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+#### SCATTER PLOTS ### 
+landuse_2018<-fishnet_data_fire%>%
+  dplyr::select('Fire18KD', 'percent_residential', 'percent_commercial','percent_industrial')%>%
+  st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)%>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(title = 'Land Use Data',subtitle = '2018 Fire Data')
+
+
+
+
+landuse_2019<-fishnet_data_fire%>%
+  dplyr::select('Fire19KD', 'percent_residential', 'percent_commercial','percent_industrial')%>%
+  st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)%>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(title = 'Land Use Data',subtitle = '2019 Fire Data')
+
+
+
+grid.arrange(landuse_2018, landuse_2019, ncol=1, top="Kernel Density of Fires to Land Use Data\n Source:  Philadelphia Department of Planning and Development")
+
+
+```
+
+### The final fishnet with the 5 features is called the fishnet_data_fire and the features are: 
+1. Median Age of Residential Buildings (building_age) 
+2. Average value per size of Residential Buildings (val_per_size)
+3. Percentage of Residential Land (percent_residential)
+4. Percentage of Commercial Land (percent_commercial)
+5. Percentage of Industrial Land (percent_industrial)
+
