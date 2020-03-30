@@ -1,0 +1,730 @@
+---
+title: "LI_EDA"
+author: "Leanne Chan"
+date: "Feb 6, 2020"
+output:
+  html_document#:
+    code_folding: hide
+    theme: sandstone
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+---
+
+```{r setup, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+library(tigris)
+options(tigris_use_cache = TRUE) 
+library(tidycensus)
+library(viridis)
+library(riem)                
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gifski)
+library(png)
+library(ggsn)
+library(gganimate)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(caret)
+library(ckanr)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(car) #test colinarity
+library(ggplot2)
+library(dplyr)
+library(gmodels)
+library(MASS)
+library(e1071)
+library(Hmisc)
+library(Boruta)
+library(corrplot)
+library(viridis)
+library(stargazer)
+library(tigris)
+library(GoodmanKruskal)
+library(spatstat)
+library(riem)
+library(readr)
+library(readxl)
+library(QuantPsyc)
+library(lubridate)
+library(jsonlite)
+library(plyr)
+
+# new packages
+library(ggpmisc) # to get R squared
+#install.packages(ggpmisc)
+```
+
+```{r map theme}
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+# sam as above 
+```
+
+```{r philly and fire data, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# city limits
+philly <- 
+  st_read("http://data.phl.opendata.arcgis.com/datasets/405ec3da942d4e20869d4e1449a2be48_0.geojson")%>%
+  st_transform(crs=2272)
+fishnet <- 
+  st_make_grid(philly, cellsize = 800) %>%
+  st_sf()
+fishnet <- 
+  fishnet[philly,] %>%
+  mutate(uniqueID = rownames(.)) %>%
+  dplyr::select(uniqueID)
+
+# fire data 
+fire.sf<-read_excel('C:/Users/leann/OneDrive/Desktop/MUSA 800/Data/2015 to 2019 fires for u of pa report run 1620.xlsx')%>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, agr = "constant") %>%
+  st_set_crs(4326) %>%
+  st_transform(2272)%>% 
+  st_intersection(., philly)%>%
+  mutate(date=dmy(alm_date),
+         Year=year(date))
+```
+
+### Get Kernel Density of Fires in each Year
+```{r KD fires years, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# for each set of points, filter by year get kernel density
+kernelDensity <- function(pointData, year, fishnetGrid, name){
+  data<-pointData %>%filter(Year == year)
+  count<- data %>% #get count by fishnet
+  dplyr::select() %>% 
+  mutate(count = 1) %>% 
+  aggregate(., fishnetGrid, sum) %>%
+  mutate(count = ifelse(is.na(count), 0, count),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnetGrid) / 24), size=nrow(fishnetGrid), replace = TRUE))
+  
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(count))
+  KD <- spatstat::density.ppp(point_ppp, 1000)
+  
+  KD_dataframe<-as.data.frame(KD) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnetGrid)) %>%
+    aggregate(.,fishnetGrid, mean)%>%plyr::rename(.,c('value' = name))
+    
+  return(KD_dataframe)
+}
+
+
+f15_KD <- kernelDensity(fire.sf, 2015, fishnet, 'Fire15KD')
+f16_KD <- kernelDensity(fire.sf, 2016, fishnet, 'Fire16KD')
+f17_KD <- kernelDensity(fire.sf, 2017, fishnet, 'Fire17KD')
+f18_KD <- kernelDensity(fire.sf, 2018, fishnet, 'Fire18KD')
+f19_KD <- kernelDensity(fire.sf, 2019, fishnet, 'Fire19KD')
+```
+
+# License and Inspection Violations Analysis 
+Areas with a higher risk of fire are more in need of fire hydrants. In order to predict the latent risk of fire, License and Inspection violations that could potential increase the risk of fire were analyzed. Four different L&I violations were analayzed:  
+1. Unsafe Structures  
+2. Imminently Dangerous Structures  
+3. Commercial Properties Lacking Proper Extinguishers  
+4. Properties without Smoke Alarms  
+
+Three measures were used to analyze the relationship:  
+1. Kernel Density: This is the average spatial density of the violation per grid cell.  
+2. Count: This is the count of violations per grid cell.  
+3. Nearest Neighbor Distance: The average distance from each grid cell to the nearest 5 violations.  
+
+Each of these measures were measured against the Kernel Density of fires per grid cell.
+
+The following code contains helper functions to read in data from API, aggregate data and to calculate nearest neighbor distances.
+```{r}
+# read data only for L&I violations, following carto API. 
+readData<-function(link){
+  raw<-fromJSON(link)
+  formated<- as.data.frame(raw$rows) %>%
+    dplyr::select(censustract,violationdate,violationdescription, status, casestatus, casepriority, geocode_x,geocode_y) %>%
+    mutate('Year' = year(ymd_hms(violationdate)))%>%
+    na.omit(., cols=c("geocode_x", "geocode_y"))%>%
+    st_as_sf(coords = c("geocode_x", "geocode_y"), crs = 2272) %>%
+    mutate(
+      X = st_coordinates(.)[,1],
+      Y = st_coordinates(.)[,2])
+  return(formated)
+}
+
+aggViolation<-function(violation, year, fishnet, KD_Fire){
+  data<-violation[violation$Year == year,]
+  # Step 1: Get fishnet count of that violation 
+  fishnetCount<-data %>% 
+    dplyr::select() %>% 
+    mutate(count = 1) %>% 
+    aggregate(., fishnet, sum) %>%
+    mutate(count = ifelse(is.na(count), 0, count),
+           uniqueID = rownames(.),
+           cvID = sample(round(nrow(fishnet) / 24), size=nrow(fishnet), replace = TRUE))
+  
+  # Step 2: Get Kernel Density
+  name<-paste(year, "KD", sep="_")
+  point_ppp <- as.ppp(st_coordinates(data), W = st_bbox(fishnet))
+  KD_Viol <- as.data.frame(spatstat::density.ppp(point_ppp, 1000)) %>% 
+    st_as_sf(coords = c("x", "y"), crs = st_crs(fishnet)) %>%
+    aggregate(.,fishnet, mean)%>%plyr::rename(.,c('value' = name))
+  
+  
+  # Step 3: Join the  KD fire to the kernel density of violation to count of Violation
+  # also make sure the geometry is a centroid 
+  all_aggregates <- st_join(KD_Fire, KD_Viol %>% dplyr::select(name) %>% st_centroid(.))%>%
+  st_join(., fishnetCount%>% dplyr::select(count) %>% st_centroid(.))%>%st_centroid(.)
+
+  # Step 4: Add avg 5 nearest neighbor distances
+  all_aggregates$nn5 =
+      nn_function(st_coordinates(all_aggregates), st_coordinates(data), 5) # avg of 5 nearest neighbors
+  
+  return(all_aggregates)
+} 
+
+
+## nearest neighbor function
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    dplyr::summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+```
+
+## Violation 1: Unsafe Structures
+A structure is deemed unsafe if it is dangerous to life, health and safety of the public or occupants, either because it does not protect/warn occupants in the event of a fire, or becasue it constains unsafe/damanged equipment. Therefore, it felt necessary to examine how the presence of unsafe structures could increase the risk of fire. Given that there is a relationship, such a factor would be useful in predicting the risk of fire, and identifying areas where a working hydrant is more crucial.
+```{r unsafe data,fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+unsafe_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-108.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)") 
+```
+
+### 1a. Plot of Kernel Density of Unsafe Structures Across Philly
+```{r US KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+USKD_15<- kernelDensity(unsafe_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_16<- kernelDensity(unsafe_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_17<- kernelDensity(unsafe_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+USKD_18<- kernelDensity(unsafe_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+USKD_19<- kernelDensity(unsafe_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(USKD_15,USKD_16,USKD_17,USKD_18,USKD_19, ncol=3, top="KD of Unsafe Structures; Source: L&I Violations")
+
+```
+
+### 1b. Relationship to Fire Kernel Density
+```{r unsafe structures,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+# for unsafe structures
+unsafe_15<-aggViolation(unsafe_structures, 2015, fishnet, f15_KD)
+unsafe_16<-aggViolation(unsafe_structures, 2016, fishnet, f16_KD)
+unsafe_17<-aggViolation(unsafe_structures, 2017, fishnet, f17_KD)
+unsafe_18<-aggViolation(unsafe_structures, 2018, fishnet, f18_KD)
+unsafe_19<-aggViolation(unsafe_structures, 2019, fishnet, f19_KD)
+
+
+year15<- unsafe_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16<-unsafe_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17<-unsafe_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18<-unsafe_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19<-unsafe_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+grid.arrange(year15, year16, year17, year18, year19, ncol=1, top="Unsafe Structures PM15-108.1; Source: L&I Violations")
+  
+```
+
+
+## Violation 2: Imminently Dangerous
+An imminently dangerous structure is one that 'IS IN IMMINENT DANGER OF COLLAPSE YOU MUST REPAIR OR DEMOLISH SAID STRUCTURE IMMEDIATELY'. The presence of such structures could add to the risk of fire in the area. 
+
+```{r id DATA,   fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+ID_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27PM15-110.1%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+### 2a. Plot of Kernel Density of Imminently Dangerous Structures Across Philly
+```{r id KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+IDKD_15<- kernelDensity(ID_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_16<- kernelDensity(ID_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_17<- kernelDensity(ID_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+IDKD_18<- kernelDensity(ID_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+IDKD_19<- kernelDensity(ID_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(IDKD_15,IDKD_16,IDKD_17,IDKD_18,IDKD_19, ncol=3, top="KD of Imminently Dangerous Structures; Source: L&I Violations")
+
+```
+
+### 2b. Relationship to Fire Kernel Density
+```{r imminently dangerous,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+
+ID_15<-aggViolation(ID_structures, 2015, fishnet, f15_KD)
+ID_16<-aggViolation(ID_structures, 2016, fishnet, f16_KD)
+ID_17<-aggViolation(ID_structures, 2017, fishnet, f17_KD)
+ID_18<-aggViolation(ID_structures, 2018, fishnet, f18_KD)
+ID_19<-aggViolation(ID_structures, 2019, fishnet, f19_KD)
+
+
+year15_ID<- ID_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_ID<-ID_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_ID<-ID_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18_ID<-ID_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19_ID<-ID_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+grid.arrange(year15_ID, year16_ID, year17_ID, year18_ID, year19_ID, ncol=1, top="Imminently Dangerous Structures, PM15-110.11; Source: L&I Violations")
+
+
+  
+```
+
+
+
+## Violation 3: Lacking Proper Fire Extinguisher for Commercial Cooking
+This violation is issued to commercial establishments that do not have the 'CLASS K RATED' fire extinguishers required for cooking involving vegetable or animal oils and fats. Commercial establishments that lack the correct fire extinguishers increase the risk of a large fire that could put staff and customers at risk. Thus it is necessary to identify areas where this violation is common. 
+
+Note: 2018 and 2019 have been ommitted in relationship analysis to fire as there was only one case for 2018 and two cases for 2019. 
+```{r CE data,   fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+CE_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-904.11/5%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+
+### 3a. Plot of Kernel Density of Commericial Properties Lacking Proper Fire Extinguishers Across Philly
+```{r CE KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+CEKD_15<- kernelDensity(CE_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_16<- kernelDensity(CE_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_17<- kernelDensity(CE_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+CEKD_18<- kernelDensity(CE_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+CEKD_19<- kernelDensity(CE_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(CEKD_15,CEKD_16,CEKD_17,CEKD_18,CEKD_19, ncol=3, top="KD of Commercial Properties Lacking Proper Extinguishers; Source: L&I Violations")
+
+```
+
+### 3b. Relationship to Fire Kernel Density
+```{r commercial Fire Extinguisher,  fig.width=12, fig.height=9, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+
+CE_15<-aggViolation(CE_structures, 2015, fishnet, f15_KD)
+CE_16<-aggViolation(CE_structures, 2016, fishnet, f16_KD)
+CE_17<-aggViolation(CE_structures, 2017, fishnet, f17_KD)
+#CE_18<-aggViolation(CE_structures, 2018, fishnet, f18_KD)
+#CE_19<-aggViolation(CE_structures, 2019, fishnet, f19_KD)
+
+
+year15_CE<- CE_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_CE<-CE_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_CE<-CE_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+# year18_CE<-CE_18%>%st_set_geometry(NULL)%>%
+#   gather(Variable, Value, -Fire18KD)  %>%
+#    ggplot(aes(Value, Fire18KD)) +
+#      geom_point() +
+#      geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+#     stat_poly_eq(formula = y ~ x,
+#                eq.with.lhs = "italic(hat(y))~`=`~",
+#                aes(label = paste(..rr.label.., sep =" ")), 
+#                parse = TRUE, label.x = 60, label.y = 70) +    
+#      facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+# 
+# 
+# year19_CE<-CE_19%>%st_set_geometry(NULL)%>%
+#   gather(Variable, Value, -Fire19KD)  %>%
+#    ggplot(aes(Value, Fire19KD)) +
+#      geom_point() +
+#      geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+#     stat_poly_eq(formula = y ~ x,
+#                eq.with.lhs = "italic(hat(y))~`=`~",
+#                aes(label = paste(..rr.label.., sep =" ")), 
+#                parse = TRUE, label.x = 60, label.y = 70) +    
+#      facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+# 
+
+grid.arrange(year15_CE, year16_CE, year17_CE, ncol=1, top="Commerical Cooking Lack Proper Fire Extinguisher, FC-904.11/5; Source: L&I Violations")
+
+```
+
+
+## Violation 4: Lacking smoke Alarm
+Such properties lack the required smoke alarms and thus put lives in danger should there be a fires, making it necessary to ensure hydrants are in working condition near these areas. 
+
+```{r ALM DATA, fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+ALM_structures<-readData("https://phl.carto.com/api/v2/sql?q=SELECT%20*%20FROM%20li_violations%20WHERE%20(violationtype%20=%20%27FC-907.3/20%27)%20AND%20(violationdate%20%3E=%20%272015-01-01%27)")
+```
+
+### 4a. Plot of Kernel Density of Properties lacking smoke alarams Across Philly
+```{r ALM KD,  fig.width=12, fig.height=10, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+ALMKD_15<- kernelDensity(ALM_structures, 2015, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2015) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_16<- kernelDensity(ALM_structures, 2016, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2016) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_17<- kernelDensity(ALM_structures, 2017, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2017) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+ALMKD_18<- kernelDensity(ALM_structures, 2018, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2018) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+
+ALMKD_19<- kernelDensity(ALM_structures, 2019, fishnet, 'KD')%>%
+  ggplot() +
+  geom_sf(aes(fill=KD),colour=NA) +
+  labs(title = 2019) +
+  scale_fill_viridis(option='inferno') +
+  mapTheme()
+
+grid.arrange(ALMKD_15,ALMKD_16,ALMKD_17,ALMKD_18,ALMKD_19, ncol=3, top="KD of Properties without Smoke Alarms; Source: L&I Violations")
+
+```
+
+
+### 4b. Relationship to Fire Kernel Density
+```{r smoke alarms,  fig.width=12, fig.height=15, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE,fig.align='center'}
+
+
+ALM_15<-aggViolation(ALM_structures, 2015, fishnet, f15_KD)
+ALM_16<-aggViolation(ALM_structures, 2016, fishnet, f16_KD)
+ALM_17<-aggViolation(ALM_structures, 2017, fishnet, f17_KD)
+ALM_18<-aggViolation(ALM_structures, 2018, fishnet, f18_KD)
+ALM_19<-aggViolation(ALM_structures, 2019, fishnet, f19_KD)
+
+
+year15_ALM<- ALM_15%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire15KD)  %>%
+   ggplot(aes(Value, Fire15KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2015')
+ 
+year16_ALM<-ALM_16%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire16KD)  %>%
+   ggplot(aes(Value, Fire16KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2016')
+ 
+year17_ALM<-ALM_17%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire17KD)  %>%
+   ggplot(aes(Value, Fire17KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2017')
+
+year18_ALM<-ALM_18%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire18KD)  %>%
+   ggplot(aes(Value, Fire18KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2018')
+
+
+year19_ALM<-ALM_19%>%st_set_geometry(NULL)%>%
+  gather(Variable, Value, -Fire19KD)  %>%
+   ggplot(aes(Value, Fire19KD)) +
+     geom_point() +
+     geom_smooth(method = "lm", se=F, colour = "#FA7800") +
+    stat_poly_eq(formula = y ~ x,
+               eq.with.lhs = "italic(hat(y))~`=`~",
+               aes(label = paste(..rr.label.., sep =" ")), 
+               parse = TRUE, label.x = 60, label.y = 70) +    
+     facet_wrap(~Variable, ncol = 3, scales = "free") + labs(subtitle = '2019')
+
+
+
+grid.arrange(year15_ALM, year16_ALM, year17_ALM, year18_ALM, year19_ALM, ncol=1, top="Property Lacks Smoke Alarm, FC-907.3/20; Source: L&I Violations")
+
+```
+
